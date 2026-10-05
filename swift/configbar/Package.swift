@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "ConfigBar",
     platforms: [
-        .macOS(.v13),
+        .macOS("15.0"),
     ],
     products: [
         .library(

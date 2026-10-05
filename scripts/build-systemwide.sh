@@ -469,7 +469,7 @@ create_app_bundle() {
     <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>15.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
@@ -555,7 +555,7 @@ JSON
     if ! xcrun actool \
         --compile "$APP_BUNDLE/Contents/Resources" \
         --platform macosx \
-        --minimum-deployment-target 13.0 \
+        --minimum-deployment-target 15.0 \
         --app-icon AppIcon \
         --include-all-app-icons \
         --output-partial-info-plist "$partial_plist" \

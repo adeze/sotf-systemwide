@@ -23,7 +23,7 @@
         <string>MacOSX</string>
     </array>
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>15.0</string>
     <key>CFPlugInDynamicRegisterFunction</key>
     <string></string>
     <key>CFPlugInDynamicRegistration</key>
