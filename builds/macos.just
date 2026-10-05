@@ -61,7 +61,7 @@ prod-hal-driver:
 		"$HAL_SWIFT_DIR/Sources/RealtimeChaChaPoly.swift" \
 		"$HAL_SWIFT_DIR/Sources/SotFHALDriver.swift"
 	cp "$HAL_SWIFT_DIR/Info.plist" "$BUILD_DIR/Contents/Info.plist"
-	cp "crates/driver-hal/shared_memory_layout.json" \
+	cp "../sotf-daw/crates/driver-hal/shared_memory_layout.json" \
 		"$BUILD_DIR/Contents/Resources/shared_memory_layout.json"
 	chmod 755 "$BUILD_DIR/Contents/MacOS/SotFHAL"
 	chmod 644 "$BUILD_DIR/Contents/Info.plist"
@@ -109,7 +109,7 @@ test-hal-driver-swift:
 		"$HAL_SWIFT_DIR/Sources/Tests.swift" \
 		"$HAL_SWIFT_DIR/TestsRunner.swift"
 	cp "$HAL_SWIFT_DIR/TestsBundleInfo.plist" "$BUILD_DIR/Contents/Info.plist"
-	cp "crates/driver-hal/shared_memory_layout.json" \
+	cp "../sotf-daw/crates/driver-hal/shared_memory_layout.json" \
 		"$BUILD_DIR/Contents/Resources/shared_memory_layout.json"
 	chmod 755 "$BUILD_DIR/Contents/MacOS/SotFHALTests"
 	SOTF_RUST_HAL_TRANSPORT_WORKER="$WORKER_PATH" \
@@ -172,7 +172,7 @@ dist-hal-driver:
 		"$HAL_SWIFT_DIR/Sources/RealtimeChaChaPoly.swift" \
 		"$HAL_SWIFT_DIR/Sources/SotFHALDriver.swift"
 	cp "$HAL_SWIFT_DIR/Info.plist" "$BUILD_DIR/Contents/Info.plist"
-	cp "crates/driver-hal/shared_memory_layout.json" \
+	cp "../sotf-daw/crates/driver-hal/shared_memory_layout.json" \
 		"$BUILD_DIR/Contents/Resources/shared_memory_layout.json"
 	chmod 755 "$BUILD_DIR/Contents/MacOS/SotFHAL"
 	chmod 644 "$BUILD_DIR/Contents/Info.plist"

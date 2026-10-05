@@ -12,20 +12,21 @@ test-systemwide-linux-arm64:
 	#!/usr/bin/env bash
 	set -euo pipefail
 	image="sotf-systemwide-test-linux-arm64"
-	project_root=$(pwd -P)
+	# Mount the full all_of_sotf tree so both path-dependency siblings resolve.
+	project_root=$(cd .. && pwd -P)
 	docker build \
 		--platform linux/arm64 \
 		--progress plain \
 		--tag "$image" \
-		--file builds/systemwide/Dockerfile.test-linux-arm64 \
-		.
+		--file ../sotf/builds/systemwide/Dockerfile.test-linux-arm64 \
+		..
 	docker run --rm \
 		--platform linux/arm64 \
-		--volume "$project_root:/project:ro" \
+		--volume "$project_root:/workspace:ro" \
 		--volume sotf-systemwide-cargo-registry-linux-arm64:/usr/local/cargo/registry \
 		--volume sotf-systemwide-cargo-git-linux-arm64:/usr/local/cargo/git \
 		--volume sotf-systemwide-target-linux-arm64:/build-target \
-		--workdir /project \
+		--workdir /workspace/sotf-systemwide \
 		--env CARGO_TARGET_DIR=/build-target \
 		--env CARGO_INCREMENTAL=0 \
 		"$image" \
