@@ -48,6 +48,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
+# nnnoiseless is owned by the sibling DAW workspace; stage its canonical notices.
+source "$PROJECT_ROOT/../sotf-daw/scripts/lib/nnnoiseless_model_notices.sh"
 
 # Extract version from root Cargo.toml
 VERSION=$(sotf_version "$PROJECT_ROOT")
@@ -379,6 +381,8 @@ setup_systemwide_bundle() {
     mkdir -p "$APP_BUNDLE/Contents/MacOS"
     mkdir -p "$APP_BUNDLE/Contents/Resources"
     mkdir -p "$APP_BUNDLE/Contents/Helpers"
+    stage_nnnoiseless_model_notices \
+        "$PROJECT_ROOT/../sotf-daw" "$APP_BUNDLE/Contents/Resources"
 
     # Copy the compiled Systemwide binary
     cp "$BUILD_DIR/$SYSTEMWIDE_BINARY" "$APP_BUNDLE/Contents/MacOS/"
