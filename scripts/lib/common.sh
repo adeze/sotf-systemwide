@@ -19,6 +19,43 @@ sotf_version() {
     grep -m1 '^version = ' "$root/Cargo.toml" | sed -E 's/version = "(.*)"/\1/'
 }
 
+# Derive the distribution architecture from every required payload executable.
+# All payloads must have the same supported slice set; a mixed bundle cannot
+# advertise a platform on which one of its required components will not run.
+sotf_payload_architecture() {
+    if [ "$#" -eq 0 ]; then
+        echo "No payload executables supplied for architecture inspection" >&2
+        return 1
+    fi
+    local executable slices normalized architecture expected=""
+    for executable in "$@"; do
+        if [ ! -x "$executable" ]; then
+            echo "Payload executable is missing or not executable: $executable" >&2
+            return 1
+        fi
+        if ! slices=$(/usr/bin/lipo -archs "$executable"); then
+            echo "Cannot inspect payload architecture: $executable" >&2
+            return 1
+        fi
+        normalized=$(printf '%s\n' "$slices" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort | paste -sd ' ' -)
+        case "$normalized" in
+            arm64) architecture="arm64" ;;
+            x86_64) architecture="x86_64" ;;
+            "arm64 x86_64") architecture="universal" ;;
+            *)
+                echo "Unsupported payload architecture '$normalized': $executable" >&2
+                return 1
+                ;;
+        esac
+        if [ -n "$expected" ] && [ "$expected" != "$architecture" ]; then
+            echo "Payload architectures do not match: $executable is $architecture, expected $expected" >&2
+            return 1
+        fi
+        expected="$architecture"
+    done
+    printf '%s\n' "$expected"
+}
+
 # Color codes
 SOTF_RED='\033[0;31m'
 SOTF_GREEN='\033[0;32m'

@@ -41,6 +41,13 @@ The current code is split into four major surfaces:
 The daemon also depends on the workspace audio engine and plugin stack:
 `sotf_audio::manager::AudioEngineManager`, `sotf-engine`, and `sotf-plugins`.
 
+Packaging inspects the assembled menu-bar app, embedded daemon, and required HAL
+executable before choosing the distribution architecture. All required
+executables must share the same supported slice set. The filename and installer
+`hostArchitectures` reflect that set; a thin ARM64 build cannot advertise a
+universal package. A required missing HAL bundle stops packaging. HAL is omitted
+only when the caller explicitly selects `--no-hal`.
+
 ## Review Hardening Status
 
 The July 2026 systemwide review follow-up tightened the existing macOS and

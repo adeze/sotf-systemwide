@@ -352,9 +352,8 @@ copy_hal_driver() {
     local HAL_BUILD_DIR="$PROJECT_ROOT/target/dist/SotFHAL.driver"
 
     if [ ! -d "$HAL_BUILD_DIR" ]; then
-        log_warning "HAL driver not found at $HAL_BUILD_DIR"
-        BUILD_HAL=false
-        return 0
+        log_error "Required HAL driver not found at $HAL_BUILD_DIR"
+        return 1
     fi
 
     log_info "Copying HAL driver to DMG directory..."
@@ -627,6 +626,22 @@ create_app_icon() {
 
     rm -rf "$iconset_dir"
     log_success "App icon created from configbar icon.svg"
+}
+
+# Inspect the assembled payload before choosing filenames or installer platforms.
+set_package_architecture() {
+    local payloads=(
+        "$APP_BUNDLE/Contents/MacOS/$SYSTEMWIDE_BINARY"
+        "$APP_BUNDLE/Contents/Helpers/$DAEMON_BINARY"
+    )
+    if $BUILD_HAL; then
+        payloads+=("$DRIVER_BUNDLE/Contents/MacOS/SotFHAL")
+    fi
+    PACKAGE_ARCH=$(sotf_payload_architecture "${payloads[@]}") || return 1
+    case "$PACKAGE_ARCH" in
+        universal) PACKAGE_HOST_ARCHITECTURES="arm64,x86_64" ;;
+        *) PACKAGE_HOST_ARCHITECTURES="$PACKAGE_ARCH" ;;
+    esac
 }
 
 # Create README for the DMG
@@ -1022,7 +1037,7 @@ UNINSTALL_SCRIPT
 create_dmg_file() {
     log_info "Creating DMG..."
 
-    local dmg_path="$DMG_DIR/sotf-systemwide-$VERSION-macos-universal.dmg"
+    local dmg_path="$DMG_DIR/sotf-systemwide-$VERSION-macos-$PACKAGE_ARCH.dmg"
     local dmg_temp="$DMG_DIR/temp.dmg"
 
     rm -f "$dmg_path" "$dmg_temp"
@@ -1106,7 +1121,7 @@ create_dmg_hdiutil() {
 create_pkg() {
     log_info "Creating installer package..."
 
-    local pkg_path="$DMG_DIR/sotf-systemwide-$VERSION-macos-universal.pkg"
+    local pkg_path="$DMG_DIR/sotf-systemwide-$VERSION-macos-$PACKAGE_ARCH.pkg"
     local pkg_root="$DMG_DIR/pkg-root"
     local hal_pkg_root="$DMG_DIR/pkg-root-hal"
     local pkg_scripts="$DMG_DIR/pkg-scripts"
@@ -1783,7 +1798,7 @@ DISTXML
 
     cat >> "$DMG_DIR/distribution.xml" << DISTXML
 
-    <options hostArchitectures="arm64,x86_64"/>
+    <options hostArchitectures="$PACKAGE_HOST_ARCHITECTURES"/>
 
     <choices-outline>
         <line choice="$SYSTEMWIDE_BUNDLE_ID"/>
@@ -1940,6 +1955,7 @@ main() {
     copy_hal_driver
     setup_systemwide_bundle
     create_app_bundle
+    set_package_architecture
     sign_release_payloads
 
     if $BUILD_DMG; then
@@ -1952,7 +1968,7 @@ main() {
         log_success "Build complete!"
         log_info "=========================================="
 
-        local dmg_path="$DMG_DIR/sotf-systemwide-$VERSION-macos-universal.dmg"
+        local dmg_path="$DMG_DIR/sotf-systemwide-$VERSION-macos-$PACKAGE_ARCH.dmg"
         if [ -f "$dmg_path" ]; then
             mkdir -p "$PROJECT_ROOT/dist"
             cp "$dmg_path" "$PROJECT_ROOT/dist/"
@@ -1970,7 +1986,7 @@ main() {
         log_success "Build complete!"
         log_info "=========================================="
 
-        local pkg_path="$DMG_DIR/sotf-systemwide-$VERSION-macos-universal.pkg"
+        local pkg_path="$DMG_DIR/sotf-systemwide-$VERSION-macos-$PACKAGE_ARCH.pkg"
         if [ -f "$pkg_path" ]; then
             mkdir -p "$PROJECT_ROOT/dist"
             cp "$pkg_path" "$PROJECT_ROOT/dist/"

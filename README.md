@@ -83,6 +83,13 @@ cargo build -p sotf-daemon --release
 
 ## Running
 
+Distribution filenames and installer platform restrictions come from the
+assembled app, daemon, and required HAL executable slices. ARM64-only payloads
+use `macos-arm64`; `macos-universal` requires both ARM64 and x86_64 in every
+required executable. Missing or mixed-architecture payloads stop packaging.
+The explicit `--no-hal` build option omits HAL; a missing HAL build does not
+silently select that option.
+
 ```bash
 # Start the daemon
 cargo run --bin sotf-daemon --features hal --release
