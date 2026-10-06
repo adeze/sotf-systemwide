@@ -30,7 +30,7 @@ log = "0.4.28"
 memmap2 = "0.9.11"
 
 # Crypto and encoding (driver-hal shared-memory handoff)
-chacha20poly1305 = "0.10"
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 hex = "0.4"
 rand = "0.10.2"
 bytemuck = { version = "1.14", features = ["derive"] }
@@ -60,6 +60,7 @@ driver-hal = { path = "../sotf-daw/crates/driver-hal" }  # macOS only
 
 # DAW owns these forks; daemon and app resolve the same implementation.
 [patch.crates-io]
+oo7 = { path = "../gpui-toolkit/crates/3rdparties/crypto-forks/oo7" }
 # Match GPUI compatibility forks: workspace patches are not inherited.
 fontconfig-parser = { git = "https://github.com/pierreaubert/fontconfig-parser.git", rev = "d247c91f5a57edd6ba6eb26e884d4904dbfbc87e" }
 rusty-fork = { git = "https://github.com/pierreaubert/rusty-fork.git", rev = "ee62bcd64fa6afe7fae0e52a448d716dc294e98d" }
