@@ -235,9 +235,8 @@ pub(super) mod encryption_impl {
                 key,
                 fingerprint: compute_fingerprint(&key),
                 cipher: Some(AudioCipher::new(&key)),
-                // CryptoKit's HAL callback path is not allocation-free.
-                // Keep realtime transport disabled until a caller-buffer AEAD
-                // implementation is available.
+                // Encryption starts disabled; the user opts in via
+                // set_encryption once the HAL transport is up.
                 enabled: false,
             }
         }
@@ -259,9 +258,8 @@ pub(super) mod encryption_impl {
                 key,
                 fingerprint,
                 cipher,
-                // CryptoKit's HAL callback path is not allocation-free.
-                // Keep realtime transport disabled until a caller-buffer AEAD
-                // implementation is available.
+                // Encryption starts disabled; the user opts in via
+                // set_encryption once the HAL transport is up.
                 enabled: false,
             })
         }

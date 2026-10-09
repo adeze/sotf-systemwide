@@ -1164,6 +1164,25 @@ fi
 /bin/chmod 644 "$INSTALL_LOG"
 exec > >(/usr/bin/tee -a "$INSTALL_LOG") 2>&1
 
+# Run a command with a hard timeout. macOS ships no `timeout(1)`, and an
+# osascript call that never returns (wedged app, no GUI session) would hang
+# the Installer with no visible error. Returns 143 when the watchdog fires.
+run_with_timeout() {
+    local timeout_secs="$1"
+    shift
+    "$@" &
+    local child=$!
+    ( /bin/sleep "$timeout_secs"; /bin/kill -TERM "$child" 2>/dev/null ) &
+    local watcher=$!
+    # Guarded: a failing child must surface as our exit status, not trip the
+    # installer's ERR trap from inside this helper.
+    local status=0
+    wait "$child" 2>/dev/null || status=$?
+    /bin/kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    return "$status"
+}
+
 installer_step() {
     SOTF_INSTALL_STEP="$1"
     printf 'installer:PHASE:%s\n' "$SOTF_INSTALL_STEP"
@@ -1187,7 +1206,7 @@ installer_failure() {
     if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
         console_uid="$(/usr/bin/id -u "$console_user" 2>/dev/null || true)"
         if [ -n "$console_uid" ]; then
-            button="$(/bin/launchctl asuser "$console_uid" \
+            button="$(run_with_timeout 60 /bin/launchctl asuser "$console_uid" \
                 /usr/bin/sudo -u "$console_user" /usr/bin/osascript \
                 -e 'button returned of (display alert "SotF installation failed" message "The installer could not complete the current step. Open the SotF installer log for details." as critical buttons {"Close", "Open Logs"} default button "Open Logs")' \
                 2>/dev/null || true)"
@@ -1208,6 +1227,9 @@ INSTALLER_COMMON
     cp "$DMG_DIR/installer-common.sh" "$pkg_scripts/installer-common.sh"
     cp "$DMG_DIR/installer-common.sh" "$hal_pkg_scripts/installer-common.sh"
     cp "$DMG_DIR/installer-common.sh" "$launch_scripts/installer-common.sh"
+    # Self-contained stdlib smoke test, staged next to the app postinstall.
+    cp "$PROJECT_ROOT/scripts/lib/daemon_smoke.py" "$pkg_scripts/daemon_smoke.py"
+    chmod 755 "$pkg_scripts/daemon_smoke.py"
 
     # Copy app to pkg root
     cp -R "$APP_BUNDLE" "$pkg_root/Applications/"
@@ -1324,68 +1346,35 @@ installer_step "Smoke-testing the SotF background audio service"
 DAEMON_LOG="$LOG_DIR/sotf-daemon.log"
 DAEMON_LOG_OFFSET="$(/usr/bin/stat -f '%z' "$DAEMON_LOG" 2>/dev/null || echo 0)"
 DAEMON_SOCKET=""
-for _ in $(/usr/bin/seq 1 60); do
+for elapsed in $(/usr/bin/seq 1 30); do
     DAEMON_SOCKET="$(/usr/bin/tail -c +$((DAEMON_LOG_OFFSET + 1)) "$DAEMON_LOG" 2>/dev/null | /usr/bin/grep 'Audio daemon listening on ' | /usr/bin/tail -n 1 | /usr/bin/sed 's/.*listening on //' || true)"
     [ -n "$DAEMON_SOCKET" ] && [ -S "$DAEMON_SOCKET" ] && break
     DAEMON_SOCKET=""
+    if [ $((elapsed % 5)) -eq 0 ]; then
+        echo "Waiting for the daemon control socket (${elapsed}s)..."
+    fi
     /bin/sleep 1
 done
 if [ -z "$DAEMON_SOCKET" ]; then
-    echo "Error: daemon did not bind its control socket within 60s; last log lines:"
+    echo "Error: daemon did not bind its control socket within 30s; last log lines:"
     /usr/bin/tail -n 30 "$DAEMON_LOG" 2>/dev/null || true
     exit 1
 fi
 echo "Daemon control socket: $DAEMON_SOCKET"
 
-# Poll status until playback is applied without a recovery latch, or time out
-# with the observed status and recent logs for diagnosis. Cold start can take
-# a while when USB devices enumerate late (bounded daemon-side retries).
-SMOKE_STATUS="$(/usr/bin/python3 - "$DAEMON_SOCKET" << 'SMOKE_EOF' 2>/dev/null || true
-import json, socket, sys, time
-path = sys.argv[1]
-def query(command, timeout=15):
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(path)
-    s.sendall((json.dumps(command) + "\n").encode())
-    data = b""
-    while not data.endswith(b"\n"):
-        chunk = s.recv(65536)
-        if not chunk:
-            break
-        data += chunk
-    s.close()
-    return json.loads(data)
-try:
-    query({"command": "ping"}, timeout=10)
-except Exception as error:
-    print(json.dumps({"ok": False, "stage": "ping", "error": str(error)}))
-    sys.exit(0)
-deadline = time.time() + 150
-last = {}
-while time.time() < deadline:
-    try:
-        last = query({"command": "status"}, timeout=15).get("data", {})
-    except Exception as error:
-        last = {"error": str(error)}
-        time.sleep(5)
-        continue
-    route = last.get("active_route", {})
-    if route.get("applied_output_device") and not last.get("pipeline_recovery"):
-        print(json.dumps({"ok": True, "status": last}))
-        sys.exit(0)
-    time.sleep(5)
-print(json.dumps({"ok": False, "stage": "playback", "status": last}))
-SMOKE_EOF
-)"
-SMOKE_OK="$(/usr/bin/python3 -c 'import json, sys; print(json.loads(sys.argv[1]).get("ok", False))' "$SMOKE_STATUS" 2>/dev/null || echo False)"
-if [ "$SMOKE_OK" != "True" ]; then
-    echo "Error: daemon smoke test failed: $SMOKE_STATUS"
-    echo "Last daemon log lines:"
+# daemon_smoke.py (staged next to this script) polls status with visible
+# progress, fails fast on terminal faults, and tolerates a powered-off
+# desired output device: the install proceeds with a loud warning and
+# ConfigBar surfaces the fault at runtime. A powered-off USB interface must
+# not fail an otherwise healthy install.
+SMOKE_STATUS=0
+SMOKE_OUTPUT="$(/usr/bin/python3 "$SCRIPT_DIR/daemon_smoke.py" "$DAEMON_SOCKET" 2>&1)" || SMOKE_STATUS=$?
+echo "$SMOKE_OUTPUT"
+if [ "$SMOKE_STATUS" -ne 0 ]; then
+    echo "Error: daemon smoke test failed; last daemon log lines:"
     /usr/bin/tail -n 30 "$DAEMON_LOG" 2>/dev/null || true
     exit 1
 fi
-echo "Daemon smoke test passed: playback applied with no recovery latch"
 
 exit 0
 POSTINSTALL
@@ -1607,7 +1596,7 @@ quit_systemwide_app() {
     if [ -n "$user_info" ]; then
         console_user="${user_info%%:*}"
         echo "Requesting SotF Systemwide app quit for user: $console_user"
-        /usr/bin/sudo -u "$console_user" /usr/bin/osascript -e 'tell application id "org.spinorama.sotf-systemwide" to quit' >/dev/null 2>&1 || true
+        run_with_timeout 15 /usr/bin/sudo -u "$console_user" /usr/bin/osascript -e 'tell application id "org.spinorama.sotf-systemwide" to quit' >/dev/null 2>&1 || true
     fi
 
     /usr/bin/pkill -TERM -x "sotf-systemwide" >/dev/null 2>&1 || true
@@ -1805,9 +1794,12 @@ DISTXML
     <options hostArchitectures="$PACKAGE_HOST_ARCHITECTURES"/>
 
     <choices-outline>
-        <line choice="$SYSTEMWIDE_BUNDLE_ID"/>
 DISTXML
 
+    # The HAL driver installs FIRST so its payload is in place and CoreAudio
+    # has restarted before the app component starts the daemon: the daemon
+    # smoke test then validates the final system state instead of an
+    # intermediate one where the old driver was just removed.
     if $BUILD_HAL; then
         cat >> "$DMG_DIR/distribution.xml" << DISTXML
         <line choice="$HAL_BUNDLE_ID"/>
@@ -1815,12 +1807,9 @@ DISTXML
     fi
 
     cat >> "$DMG_DIR/distribution.xml" << DISTXML
+        <line choice="$SYSTEMWIDE_BUNDLE_ID"/>
         <line choice="org.spinorama.sotf.autolaunch"/>
     </choices-outline>
-
-    <choice id="$SYSTEMWIDE_BUNDLE_ID" title="SotF Systemwide" description="Menu bar application for controlling the systemwide audio engine" enabled="false" selected="true">
-        <pkg-ref id="$SYSTEMWIDE_BUNDLE_ID"/>
-    </choice>
 DISTXML
 
     if $BUILD_HAL; then
@@ -1832,6 +1821,10 @@ DISTXML
     fi
 
     cat >> "$DMG_DIR/distribution.xml" << DISTXML
+    <choice id="$SYSTEMWIDE_BUNDLE_ID" title="SotF Systemwide" description="Menu bar application for controlling the systemwide audio engine" enabled="false" selected="true">
+        <pkg-ref id="$SYSTEMWIDE_BUNDLE_ID"/>
+    </choice>
+
     <choice id="org.spinorama.sotf.autolaunch" title="Launch after installation" description="Start SotF Systemwide automatically after installation completes" selected="true">
         <pkg-ref id="org.spinorama.sotf.autolaunch"/>
     </choice>

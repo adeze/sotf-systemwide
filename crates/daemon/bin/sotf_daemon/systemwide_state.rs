@@ -136,6 +136,15 @@ impl SystemwideState {
         self.pipeline.commit_applied(plan);
     }
 
+    pub(super) fn commit_fallback_applied(
+        &mut self,
+        plan: &PipelinePlan,
+        desired_output_device: Option<String>,
+    ) {
+        self.pipeline
+            .commit_fallback_applied(plan, desired_output_device);
+    }
+
     pub(super) fn set_desired_output_device(
         &mut self,
         output_device: Option<String>,

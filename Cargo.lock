@@ -328,7 +328,8 @@ dependencies = [
 [[package]]
 name = "async-task"
 version = "4.7.1"
-source = "git+https://github.com/smol-rs/async-task.git?rev=b4486cd71e4e94fbda54ce6302444de14f4d190e#b4486cd71e4e94fbda54ce6302444de14f4d190e"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
@@ -397,7 +398,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "autoeq"
-version = "0.5.74"
+version = "0.5.76"
 dependencies = [
  "anyhow",
  "autoeq-artifacts",
@@ -491,7 +492,6 @@ dependencies = [
  "math-dsp",
  "math-iir-fir",
  "math-optimisation",
- "metaheuristics-nature",
  "ndarray",
  "num-complex",
  "num_cpus",
@@ -502,6 +502,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sotf-metaheuristics-nature",
 ]
 
 [[package]]
@@ -683,6 +684,8 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 [[package]]
 name = "block"
 version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
 
 [[package]]
 name = "block-buffer"
@@ -817,7 +820,7 @@ dependencies = [
  "serde_json",
  "syn 2.0.119",
  "tempfile",
- "toml",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -1016,16 +1019,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "collections"
-version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
-dependencies = [
- "gpui_util",
- "indexmap",
- "rustc-hash",
-]
-
-[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1104,6 +1097,15 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "convert_case"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
+dependencies = [
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "convert_case"
@@ -1221,7 +1223,8 @@ dependencies = [
 [[package]]
 name = "coreaudio-rs"
 version = "0.14.2"
-source = "git+https://github.com/pierreaubert/coreaudio-rs.git?rev=29b0407363c479be0b7de681ba6ba050725a5174#29b0407363c479be0b7de681ba6ba050725a5174"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d5d7dca3ebcf65a035582c9ad4385371a9d9ee6537474d2a278f4e1e475bb58"
 dependencies = [
  "bitflags 2.13.2",
  "libc",
@@ -1566,30 +1569,23 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "derive_more"
-version = "2.1.2"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
 dependencies = [
  "derive_more-impl",
 ]
 
 [[package]]
 name = "derive_more-impl"
-version = "2.1.2"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
 dependencies = [
- "convert_case",
+ "convert_case 0.10.0",
  "proc-macro2",
  "quote",
  "rustc_version",
- "syn 2.0.119",
- "unicode-xid",
-]
-
-[[package]]
-name = "derive_refineable"
-version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
-dependencies = [
- "proc-macro2",
- "quote",
  "syn 2.0.119",
 ]
 
@@ -1964,9 +1960,10 @@ dependencies = [
 [[package]]
 name = "fontconfig-parser"
 version = "0.5.8"
-source = "git+https://github.com/pierreaubert/fontconfig-parser.git?rev=d247c91f5a57edd6ba6eb26e884d4904dbfbc87e#d247c91f5a57edd6ba6eb26e884d4904dbfbc87e"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbc773e24e02d4ddd8395fd30dc147524273a83e54e0f312d986ea30de5f5646"
 dependencies = [
- "roxmltree",
+ "roxmltree 0.20.0",
 ]
 
 [[package]]
@@ -2252,7 +2249,6 @@ dependencies = [
  "fontdue",
  "gpui-design",
  "gpui-profiler",
- "gpui-toolkit-gpui",
  "image",
  "math-delaunay",
  "regex",
@@ -2260,6 +2256,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "smol",
+ "sotf-gpui-toolkit-gpui",
  "thiserror 2.0.21",
  "wasm-bindgen-futures",
  "web-time",
@@ -2269,8 +2266,8 @@ dependencies = [
 name = "gpui-design"
 version = "0.9.7"
 dependencies = [
- "gpui-toolkit-gpui",
  "serde",
+ "sotf-gpui-toolkit-gpui",
 ]
 
 [[package]]
@@ -2285,170 +2282,6 @@ dependencies = [
 [[package]]
 name = "gpui-profiler"
 version = "0.9.3"
-
-[[package]]
-name = "gpui-toolkit-gpui"
-version = "0.2.3"
-dependencies = [
- "accesskit",
- "anyhow",
- "async-channel",
- "async-task",
- "block",
- "cbindgen",
- "chrono",
- "cocoa",
- "cocoa-foundation",
- "collections",
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "core-graphics",
- "core-text",
- "core-video",
- "ctor",
- "derive_more",
- "etagere",
- "foreign-types",
- "futures",
- "futures-concurrency",
- "getrandom 0.3.4",
- "gpui-toolkit-gpui-macros",
- "gpui-toolkit-http-client",
- "gpui-toolkit-scheduler",
- "gpui-toolkit-sum-tree",
- "gpui-toolkit-util-macros",
- "gpui_shared_string",
- "gpui_util",
- "heapless",
- "image",
- "inventory",
- "itertools 0.15.0",
- "log",
- "lyon",
- "mach2",
- "media",
- "metal",
- "num_cpus",
- "objc",
- "parking",
- "parking_lot",
- "pathfinder_geometry",
- "pin-project",
- "pollster",
- "profiling",
- "rand 0.9.5",
- "raw-window-handle",
- "refineable",
- "regex",
- "resvg",
- "schemars",
- "seahash",
- "serde",
- "serde_json",
- "slotmap",
- "smallvec",
- "stacksafe",
- "strum",
- "taffy",
- "thiserror 2.0.21",
- "ttf-parser",
- "url",
- "usvg",
- "uuid",
- "waker-fn",
- "web-time",
- "windows",
-]
-
-[[package]]
-name = "gpui-toolkit-gpui-macros"
-version = "0.1.0"
-dependencies = [
- "heck 0.5.0",
- "proc-macro2",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
-name = "gpui-toolkit-http-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-compression",
- "bytes",
- "derive_more",
- "futures",
- "http",
- "http-body",
- "log",
- "parking_lot",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "url",
-]
-
-[[package]]
-name = "gpui-toolkit-perf"
-version = "0.1.0"
-dependencies = [
- "collections",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "gpui-toolkit-scheduler"
-version = "0.1.0"
-dependencies = [
- "async-task",
- "backtrace",
- "chrono",
- "futures",
- "parking_lot",
- "rand 0.9.5",
- "web-time",
-]
-
-[[package]]
-name = "gpui-toolkit-sum-tree"
-version = "0.1.0"
-dependencies = [
- "heapless",
- "log",
- "rayon",
- "tracing",
-]
-
-[[package]]
-name = "gpui-toolkit-util-macros"
-version = "0.1.0"
-dependencies = [
- "gpui-toolkit-perf",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
-name = "gpui_shared_string"
-version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
-dependencies = [
- "schemars",
- "serde",
- "smol_str",
-]
-
-[[package]]
-name = "gpui_util"
-version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
-dependencies = [
- "anyhow",
- "log",
- "which",
-]
 
 [[package]]
 name = "h2"
@@ -2864,7 +2697,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
 dependencies = [
  "byteorder-lite",
- "quick-error",
+ "quick-error 2.0.1",
 ]
 
 [[package]]
@@ -3478,7 +3311,6 @@ dependencies = [
  "hound",
  "log",
  "math-iir-fir",
- "nalgebra",
  "ndarray",
  "num-complex",
  "oxiblas-ndarray",
@@ -3488,6 +3320,7 @@ dependencies = [
  "rustfft",
  "serde",
  "sha2 0.11.0",
+ "sotf-nalgebra",
 ]
 
 [[package]]
@@ -3514,19 +3347,19 @@ dependencies = [
  "clap",
  "directories",
  "math-test-functions",
- "nalgebra",
  "ndarray",
  "oxiblas-ndarray",
  "rand 0.10.3",
  "rayon",
  "serde",
  "sha2 0.11.0",
+ "sotf-nalgebra",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "math-rir"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "math-iir-fir",
  "rayon",
@@ -3549,21 +3382,6 @@ checksum = "3f607c237553f086e7043417a51df26b2eb899d3caff94e6a67592ff992fedc7"
 dependencies = [
  "autocfg",
  "rawpointer",
-]
-
-[[package]]
-name = "media"
-version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
-dependencies = [
- "anyhow",
- "bindgen",
- "core-foundation 0.10.1",
- "core-video",
- "ctor",
- "foreign-types",
- "metal",
- "objc",
 ]
 
 [[package]]
@@ -3594,19 +3412,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "metaheuristics-nature"
-version = "10.1.0"
-source = "git+https://github.com/pierreaubert/metaheuristics-nature-rs.git?rev=4f0b603c521e0b4e20239c827f1a0975442bb740#4f0b603c521e0b4e20239c827f1a0975442bb740"
-dependencies = [
- "getrandom 0.4.3",
- "num-traits",
- "rand 0.10.3",
- "rand_chacha 0.10.0",
- "rand_distr",
- "serde",
 ]
 
 [[package]]
@@ -3706,21 +3511,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
-name = "nalgebra"
-version = "0.35.0"
-source = "git+https://github.com/pierreaubert/nalgebra.git?rev=a42573dbc9649af62fb07b469c98c852e62720fd#a42573dbc9649af62fb07b469c98c852e62720fd"
-dependencies = [
- "approx",
- "glam",
- "matrixmultiply",
- "num-complex",
- "num-rational",
- "num-traits",
- "simba",
- "typenum",
-]
-
-[[package]]
 name = "ndarray"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3801,15 +3591,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
-]
-
-[[package]]
-name = "nnnoiseless"
-version = "0.1.1"
-dependencies = [
- "num-complex",
- "once_cell",
- "rustfft",
 ]
 
 [[package]]
@@ -3960,6 +3741,8 @@ dependencies = [
 [[package]]
 name = "objc"
 version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "915b1b472bc21c53464d6c8461c9d3af805ba1ef837e1cac254428f4a77177b1"
 dependencies = [
  "malloc_buf",
 ]
@@ -4433,7 +4216,7 @@ name = "plugins-denoiser"
 version = "0.5.14"
 dependencies = [
  "math-dsp",
- "nnnoiseless",
+ "sotf-nnnoiseless",
 ]
 
 [[package]]
@@ -4623,7 +4406,8 @@ dependencies = [
 [[package]]
 name = "psm"
 version = "0.1.32"
-source = "git+https://github.com/pierreaubert/stacker.git?rev=48bf8e3abfb350de9387a675275a629e4daf9717#48bf8e3abfb350de9387a675275a629e4daf9717"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dcd034599e63b970727f70d79e02d62390a4a84f7c6b827c27c46d5ac3fa622"
 dependencies = [
  "ar_archive_writer",
  "cc",
@@ -4634,6 +4418,12 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "quick-error"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
 name = "quick-error"
@@ -5021,14 +4811,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "refineable"
-version = "0.1.0"
-source = "git+https://github.com/pierreaubert/zed.git?rev=3a0ea890ddf8e6247e38c795a960eb18f5182113#3a0ea890ddf8e6247e38c795a960eb18f5182113"
-dependencies = [
- "derive_refineable",
-]
-
-[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5173,7 +4955,7 @@ dependencies = [
 
 [[package]]
 name = "roomeq-engine"
-version = "0.5.82"
+version = "0.5.83"
 dependencies = [
  "autoeq-core",
  "autoeq-fir",
@@ -5184,7 +4966,6 @@ dependencies = [
  "math-iir-fir",
  "math-optimisation",
  "math-rir",
- "nalgebra",
  "ndarray",
  "num-complex",
  "num_cpus",
@@ -5198,11 +4979,12 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sotf-nalgebra",
 ]
 
 [[package]]
 name = "roomeq-export"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -5217,7 +4999,7 @@ dependencies = [
 
 [[package]]
 name = "roomeq-model"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "autoeq-core",
  "clap",
@@ -5259,7 +5041,7 @@ dependencies = [
 
 [[package]]
 name = "roomeq-workflow"
-version = "0.5.33"
+version = "0.5.34"
 dependencies = [
  "anyhow",
  "autoeq-artifacts",
@@ -5293,6 +5075,12 @@ dependencies = [
 
 [[package]]
 name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
+name = "roxmltree"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
@@ -5315,20 +5103,6 @@ name = "rtrb"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9278fb35b3e730abe136e9b395b5b81b96d06b9f5478a50f0c8430a2237b22de"
-
-[[package]]
-name = "rubato"
-version = "5.0.0"
-dependencies = [
- "audioadapter",
- "audioadapter-buffers",
- "num-complex",
- "num-integer",
- "num-traits",
- "realfft",
- "visibility",
- "windowfunctions",
-]
 
 [[package]]
 name = "rusqlite"
@@ -5477,10 +5251,11 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "rusty-fork"
 version = "0.3.1"
-source = "git+https://github.com/pierreaubert/rusty-fork.git?rev=ee62bcd64fa6afe7fae0e52a448d716dc294e98d#ee62bcd64fa6afe7fae0e52a448d716dc294e98d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc6bf79ff24e648f6da1f8d1f011e9cac26491b619e6b9280f2b47f1774e6ee2"
 dependencies = [
  "fnv",
- "quick-error",
+ "quick-error 1.2.3",
  "tempfile",
  "wait-timeout",
 ]
@@ -5666,6 +5441,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]
@@ -5915,6 +5699,7 @@ dependencies = [
 [[package]]
 name = "sofa-reader"
 version = "0.2.0"
+source = "git+https://github.com/pierreaubert/sofa-reader#6e415f31ee5ab2cf16904877aa807b91ee7cc049"
 dependencies = [
  "bincode",
  "flate2",
@@ -5940,13 +5725,36 @@ dependencies = [
  "math-dsp",
  "math-rir",
  "rtrb",
- "rubato",
  "rustfft",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sotf-rubato",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "sotf-collections"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "indexmap",
+ "rustc-hash",
+ "sotf-gpui_util",
+]
+
+[[package]]
+name = "sotf-coreaudio-rs"
+version = "0.14.2"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "bitflags 2.13.2",
+ "libc",
+ "objc2-audio-toolbox",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
 ]
 
 [[package]]
@@ -5975,6 +5783,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "sotf-derive_more"
+version = "2.1.2"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "sotf-derive_more-impl",
+]
+
+[[package]]
+name = "sotf-derive_more-impl"
+version = "2.1.2"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "convert_case 0.11.0",
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn 2.0.119",
+ "unicode-xid",
+]
+
+[[package]]
+name = "sotf-derive_refineable"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "sotf-engine"
 version = "1.1.0"
 dependencies = [
@@ -5982,7 +5821,6 @@ dependencies = [
  "bytemuck",
  "chrono",
  "clap",
- "coreaudio-rs",
  "cpal",
  "crossbeam",
  "crossterm",
@@ -6003,7 +5841,6 @@ dependencies = [
  "ratatui",
  "realfft",
  "rtrb",
- "rubato",
  "rusqlite",
  "rustfft",
  "serde",
@@ -6011,8 +5848,10 @@ dependencies = [
  "serde_yaml",
  "signal-hook",
  "sotf-capture",
+ "sotf-coreaudio-rs",
  "sotf-midi",
  "sotf-plugins",
+ "sotf-rubato",
  "symphonia",
  "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
@@ -6029,6 +5868,177 @@ dependencies = [
  "tempfile",
  "tokio",
  "walkdir",
+ "which",
+]
+
+[[package]]
+name = "sotf-gpui-toolkit-gpui"
+version = "0.2.3"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "accesskit",
+ "anyhow",
+ "async-channel",
+ "async-task",
+ "block",
+ "cbindgen",
+ "chrono",
+ "cocoa",
+ "cocoa-foundation",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "core-graphics",
+ "core-text",
+ "core-video",
+ "ctor",
+ "etagere",
+ "foreign-types",
+ "futures",
+ "futures-concurrency",
+ "getrandom 0.3.4",
+ "heapless",
+ "image",
+ "inventory",
+ "itertools 0.15.0",
+ "log",
+ "lyon",
+ "mach2",
+ "metal",
+ "num_cpus",
+ "objc",
+ "parking",
+ "parking_lot",
+ "pathfinder_geometry",
+ "pin-project",
+ "pollster",
+ "profiling",
+ "rand 0.9.5",
+ "raw-window-handle",
+ "regex",
+ "resvg",
+ "schemars",
+ "seahash",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "smallvec",
+ "sotf-collections",
+ "sotf-derive_more",
+ "sotf-gpui-toolkit-gpui-macros",
+ "sotf-gpui-toolkit-http-client",
+ "sotf-gpui-toolkit-scheduler",
+ "sotf-gpui-toolkit-sum-tree",
+ "sotf-gpui-toolkit-util-macros",
+ "sotf-gpui_shared_string",
+ "sotf-gpui_util",
+ "sotf-media",
+ "sotf-refineable",
+ "stacksafe",
+ "strum",
+ "taffy",
+ "thiserror 2.0.21",
+ "ttf-parser",
+ "url",
+ "usvg",
+ "uuid",
+ "waker-fn",
+ "web-time",
+ "windows",
+]
+
+[[package]]
+name = "sotf-gpui-toolkit-gpui-macros"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "sotf-gpui-toolkit-http-client"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "bytes",
+ "futures",
+ "http",
+ "http-body",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sotf-derive_more",
+ "url",
+]
+
+[[package]]
+name = "sotf-gpui-toolkit-perf"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sotf-collections",
+]
+
+[[package]]
+name = "sotf-gpui-toolkit-scheduler"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "async-task",
+ "backtrace",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "rand 0.9.5",
+ "web-time",
+]
+
+[[package]]
+name = "sotf-gpui-toolkit-sum-tree"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "heapless",
+ "log",
+ "rayon",
+ "tracing",
+]
+
+[[package]]
+name = "sotf-gpui-toolkit-util-macros"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "quote",
+ "sotf-gpui-toolkit-perf",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "sotf-gpui_shared_string"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "schemars",
+ "serde",
+ "smol_str",
+]
+
+[[package]]
+name = "sotf-gpui_util"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "anyhow",
+ "log",
  "which",
 ]
 
@@ -6052,13 +6062,41 @@ dependencies = [
  "rayon",
  "realfft",
  "rtrb",
- "rubato",
  "rustfft",
  "serde",
  "serde_json",
  "sofa-reader",
+ "sotf-rubato",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sotf-media"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "core-foundation 0.10.1",
+ "core-video",
+ "ctor",
+ "foreign-types",
+ "metal",
+ "objc",
+]
+
+[[package]]
+name = "sotf-metaheuristics-nature"
+version = "10.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "getrandom 0.4.3",
+ "num-traits",
+ "rand 0.10.3",
+ "rand_chacha 0.10.0",
+ "rand_distr",
+ "serde",
 ]
 
 [[package]]
@@ -6076,6 +6114,31 @@ dependencies = [
  "sotf-host",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "sotf-nalgebra"
+version = "0.35.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "approx",
+ "glam",
+ "matrixmultiply",
+ "num-complex",
+ "num-rational",
+ "num-traits",
+ "simba",
+ "typenum",
+]
+
+[[package]]
+name = "sotf-nnnoiseless"
+version = "0.1.1"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "num-complex",
+ "once_cell",
+ "rustfft",
 ]
 
 [[package]]
@@ -6122,11 +6185,11 @@ name = "sotf-plugin-ambisonics"
 version = "0.6.0"
 dependencies = [
  "log",
- "nalgebra",
  "plugins-spatial",
  "serde",
  "serde_json",
  "sotf-host",
+ "sotf-nalgebra",
 ]
 
 [[package]]
@@ -6192,13 +6255,13 @@ name = "sotf-plugin-beamformer"
 version = "0.5.4"
 dependencies = [
  "math-dsp",
- "nalgebra",
  "plugins-spatial",
  "realfft",
  "rustfft",
  "serde",
  "serde_json",
  "sotf-host",
+ "sotf-nalgebra",
 ]
 
 [[package]]
@@ -6212,11 +6275,11 @@ dependencies = [
  "math-rir",
  "plugins-spatial",
  "realfft",
- "rubato",
  "rustfft",
  "serde",
  "serde_json",
  "sotf-host",
+ "sotf-rubato",
 ]
 
 [[package]]
@@ -6236,11 +6299,11 @@ dependencies = [
  "log",
  "plugins-spatial",
  "rayon",
- "rubato",
  "rustfft",
  "serde",
  "serde_json",
  "sotf-host",
+ "sotf-rubato",
  "symphonia",
  "symphonia-bundle-flac",
  "symphonia-codec-pcm",
@@ -6495,8 +6558,8 @@ version = "0.6.0"
 dependencies = [
  "audioadapter-buffers",
  "log",
- "rubato",
  "sotf-host",
+ "sotf-rubato",
 ]
 
 [[package]]
@@ -6582,7 +6645,7 @@ dependencies = [
 
 [[package]]
 name = "sotf-plugins"
-version = "0.8.0"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6607,7 +6670,6 @@ dependencies = [
  "rayon",
  "realfft",
  "rtrb",
- "rubato",
  "rusqlite",
  "rustfft",
  "serde",
@@ -6660,6 +6722,7 @@ dependencies = [
  "sotf-plugin-transient-shaper",
  "sotf-plugin-upmixer",
  "sotf-plugin-xtc",
+ "sotf-rubato",
  "symphonia",
  "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
@@ -6675,9 +6738,17 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "toml",
+ "toml 1.1.6+spec-1.1.0",
  "walkdir",
  "which",
+]
+
+[[package]]
+name = "sotf-refineable"
+version = "0.1.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "sotf-derive_refineable",
 ]
 
 [[package]]
@@ -6688,6 +6759,21 @@ dependencies = [
  "autoeq",
  "serde_json",
  "sotf-engine",
+]
+
+[[package]]
+name = "sotf-rubato"
+version = "5.0.0"
+source = "git+https://github.com/pierreaubert/sotf-3rdparties#54a6bf14eaae8fd8bd465af522e980379fbdf43c"
+dependencies = [
+ "audioadapter",
+ "audioadapter-buffers",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "realfft",
+ "visibility",
+ "windowfunctions",
 ]
 
 [[package]]
@@ -6972,6 +7058,7 @@ dependencies = [
 [[package]]
 name = "symphonia-codec-wavpack"
 version = "0.1.1"
+source = "git+https://github.com/pierreaubert/symphonia-add-ons#40fc70b468d620bea01886a3ce5e3c4d138f9c6d"
 dependencies = [
  "log",
  "symphonia-core",
@@ -7275,7 +7362,7 @@ dependencies = [
  "fax",
  "flate2",
  "half",
- "quick-error",
+ "quick-error 2.0.1",
  "weezl",
  "zune-jpeg",
 ]
@@ -7401,9 +7488,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "toml"
+version = "1.1.6+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned 1.1.1",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.4",
 ]
 
 [[package]]
@@ -7432,7 +7534,7 @@ checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
  "indexmap",
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_write",
  "winnow 0.7.15",
@@ -7464,6 +7566,12 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tower"
@@ -7709,7 +7817,7 @@ dependencies = [
  "kurbo",
  "log",
  "pico-args",
- "roxmltree",
+ "roxmltree 0.21.1",
  "simplecss",
  "siphasher",
  "skrifa",
@@ -8613,11 +8721,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "zed-font-kit"
-version = "0.14.1-zed"
-
-[[patch.unused]]
-name = "oo7"
-version = "0.7.0"

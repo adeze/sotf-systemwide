@@ -136,7 +136,14 @@ require additional simulator and installed-system evidence.
 The macOS package reports its active lifecycle step in Installer. Package
 script output is also retained at `/Library/Logs/SotF/installer.log`; on a
 script failure, a SotF dialog offers to open that log in Console. The system
-PackageKit record remains available at `/var/log/install.log`.
+PackageKit record remains available at `/var/log/install.log`. The
+postinstall daemon smoke test polls with per-poll progress lines and fails
+fast on confirmed terminal faults. When the previously selected output
+device is offline, the daemon falls back to the default-safe output and
+keeps the missing selection as the desired device (visible as an
+`output_device_fallback` warning in snapshots); power the device on or pick
+another output in SotF Systemwide. Only a daemon with no safe output at all
+warns without failing the install.
 
 ## Runtime safety contract
 

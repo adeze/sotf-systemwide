@@ -15,51 +15,65 @@ pub(super) fn plugin_type_to_engine_str(pt: &PluginType) -> &'static str {
     pt.wire_name()
 }
 
-/// Categorize plugins for the UI picker
+/// Categorize plugins for the UI picker.
+///
+/// This mirrors the canonical player grouping
+/// (`sotf_audio_player::plugin_categories::CATEGORIES`, shared by the TUI,
+/// GPUI rack, and GPUI rack-detail pickers) so every SOTF frontend renders
+/// the same categories. It is mirrored rather than reused because the
+/// daemon must not depend on the heavy `sotf-player` crate for six strings;
+/// keep the two in sync when the canonical table changes.
 pub(super) fn plugin_type_category(pt: &PluginType) -> &'static str {
     match pt {
-        PluginType::EQ
-        | PluginType::AnalogEq
-        | PluginType::FletcherMunson
-        | PluginType::LoudnessCompensation => "EQ & Tone",
-        PluginType::Gain | PluginType::Dither => "Utility",
         PluginType::Compressor
-        | PluginType::AnalogCompressor
         | PluginType::Limiter
-        | PluginType::AnalogLimiter
         | PluginType::Gate
-        | PluginType::Expander => "Dynamics",
-        PluginType::MultibandCompressor | PluginType::MultibandExpander => "Dynamics",
-        PluginType::AAE
-        | PluginType::Upmixer
-        | PluginType::Downmix
-        | PluginType::MonoToStereo
-        | PluginType::Matrix
-        | PluginType::ChannelMuteSolo => "Spatial & Routing",
-        PluginType::BinauralDecoder | PluginType::XTC => "Spatial & Routing",
-        PluginType::Convolution => "Effects",
+        | PluginType::Expander
+        | PluginType::MultibandCompressor
+        | PluginType::MultibandExpander
+        | PluginType::TransientShaper
+        | PluginType::DeEsser
+        | PluginType::Saturation
+        | PluginType::DynamicEq
+        | PluginType::SpectralCompressor
+        | PluginType::AnalogCompressor
+        | PluginType::AnalogLimiter => "Dynamics",
+        PluginType::EQ
+        | PluginType::LinearPhaseEq
+        | PluginType::AnalogEq
+        | PluginType::Gain
+        | PluginType::Delay
+        | PluginType::LoudnessCompensation
+        | PluginType::Dither => "EQ & Tone",
         PluginType::Denoiser
         | PluginType::Declick
         | PluginType::HissReducer
         | PluginType::SpeechDenoiser
-        | PluginType::Pnd => "Restoration",
-        PluginType::LoudnessMonitor | PluginType::SpectrumAnalyzer => "Monitoring",
-        PluginType::ABCompare => "Utility",
-        PluginType::Crossover
+        | PluginType::Aec
+        | PluginType::Pnd => "Denoising",
+        PluginType::Upmixer
+        | PluginType::Matrix
+        | PluginType::BinauralDecoder
+        | PluginType::Convolution
+        | PluginType::XTC
+        | PluginType::Crossfeed
+        | PluginType::Beamformer
+        | PluginType::AmbisonicsDecoder
+        | PluginType::AAE
+        | PluginType::StereoImager
+        | PluginType::Downmix
+        | PluginType::MonoToStereo => "Spatial",
+        PluginType::LoudnessMonitor | PluginType::SpectrumAnalyzer | PluginType::ABCompare => {
+            "Analysis"
+        }
+        PluginType::ChannelMuteSolo
+        | PluginType::Crossover
         | PluginType::BandSplit
-        | PluginType::BandMerge
-        | PluginType::Crossfeed => "Utility",
-        PluginType::Delay => "Effects",
-        PluginType::Aec => "Restoration",
-        PluginType::Beamformer => "Spatial & Routing",
-        PluginType::AmbisonicsDecoder => "Spatial & Routing",
-        PluginType::StereoImager => "Spatial & Routing",
-        PluginType::DeEsser => "Dynamics",
-        PluginType::TransientShaper => "Dynamics",
-        PluginType::Saturation => "Effects",
-        PluginType::DynamicEq => "Dynamics",
-        PluginType::LinearPhaseEq => "EQ",
-        PluginType::SpectralCompressor => "Dynamics",
+        | PluginType::BandMerge => "Routing",
+        // Not in the canonical picker categories: FletcherMunson is
+        // superseded by LoudnessCompensation (and excluded from the daemon
+        // response); External is never a generic picker entry.
+        PluginType::FletcherMunson => "Legacy",
         PluginType::External => "External",
     }
 }
@@ -83,7 +97,7 @@ mod tests {
                 plugin_type.wire_name()
             );
         }
-        assert_eq!(plugin_type_category(&PluginType::Dither), "Utility");
+        assert_eq!(plugin_type_category(&PluginType::Dither), "EQ & Tone");
         assert_eq!(plugin_type_category(&PluginType::AnalogEq), "EQ & Tone");
         assert_eq!(
             plugin_type_category(&PluginType::AnalogCompressor),

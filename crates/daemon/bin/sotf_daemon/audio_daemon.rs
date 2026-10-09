@@ -700,11 +700,15 @@ impl SystemwideController {
                 println!("   No output device override; playback thread will choose a safe device");
             }
 
-            // Recall the stored DSP profile for the configured output so a
-            // restart restores the right chain instead of starting empty.
-            // Fresh daemons (no profiles yet) start empty and adopt it as
-            // `default` on first profile use.
-            let startup_chain = daemon.resolve_startup_chain(output_device.as_deref());
+            // Recall the stored DSP profile for the device playback will
+            // actually open. When the configured output is missing, the
+            // apply path falls back to the default-safe device, and the
+            // fallback must play its own chain — never the missing
+            // interface's correction. Fresh daemons (no profiles yet) start
+            // empty and adopt it as `default` on first profile use.
+            let effective_device =
+                super::misc::resolve_effective_output_device(output_device.as_deref());
+            let startup_chain = daemon.resolve_startup_chain(effective_device.device.as_deref());
 
             // Cold-start at the HAL transport's actual geometry. The timing
             // path below already adopts the HAL sample rate and buffer size;
@@ -771,6 +775,11 @@ impl SystemwideController {
                     println!("   Driver playback failed: {:?}", result.error);
                     return;
                 }
+                // Committing to another attempt: the latch from the previous
+                // failure is stale while a retry is pending, so clear it. A
+                // terminal failure re-latches on the final attempt.
+                daemon.system_state.lock().clear_pipeline_recovery();
+                println!("   Cleared stale pipeline recovery before startup retry");
                 // Wait for the desired device with the guard released. A
                 // concurrent IPC mutation changes the generation and aborts
                 // this loop on the next check above.
@@ -1159,6 +1168,32 @@ impl SystemwideController {
                 "actions": recovery.actions,
             }));
         }
+        // Desired/applied divergence while streaming means fallback is
+        // active: the remembered device is gone and playback moved to the
+        // default-safe output. Warning, not error — audio is flowing. Gated
+        // on streaming so an idle engine with a stale applied spec (stop
+        // preserves it) does not report a fallback that is not playing.
+        if let (Some(desired_device), Some(applied_device)) = (
+            desired.output_device.as_ref(),
+            applied_output_device.as_ref(),
+        ) && desired_device != applied_device
+            && matches!(
+                state,
+                sotf_audio::manager::StreamingState::Playing
+                    | sotf_audio::manager::StreamingState::Paused
+            )
+        {
+            faults.push(serde_json::json!({
+                "code": "output_device_fallback",
+                "severity": "warning",
+                "message": format!(
+                    "Desired output device '{desired_device}' is unavailable; playing through '{applied_device}'."
+                ),
+                "desired_output_device": desired_device,
+                "applied_output_device": applied_device,
+                "actions": ["select_output_device"],
+            }));
+        }
 
         let metering = self.metering_snapshot();
         push_metering_faults(&state_name, &metering, &mut faults);
@@ -1313,9 +1348,15 @@ impl SystemwideController {
         if driver_status.driver_installed && !driver_status.driver_ready {
             recovery_actions.push("restart_daemon".to_string());
         }
-        if selected_device.is_none()
-            && pipeline_applied_output_device.is_none()
+        // A latched device-availability fault with nothing playing means the
+        // desired output is gone (powered off, unplugged): the operator must
+        // pick a reachable device, not just restart the daemon.
+        if pipeline_applied_output_device.is_none()
             && engine_state.playback_output_device.is_none()
+            && (selected_device.is_none()
+                || pipeline_recovery.as_ref().is_some_and(|recovery| {
+                    super::misc::startup_error_is_device_availability(Some(&recovery.error))
+                }))
         {
             recovery_actions.push("select_output_device".to_string());
         }
@@ -1796,6 +1837,23 @@ impl SystemwideController {
         driver_buffer_frames: u32,
         force_driver_config: bool,
     ) -> Response {
+        // A stale desired device (unplugged since it was selected) degrades
+        // to the default-safe output instead of failing the start. Resolved
+        // before the fast path so a no-op re-apply still skips the restart
+        // while diverged. Explicit route changes validate the device before
+        // reaching here, so substitution never masks a live user intent.
+        let effective =
+            super::misc::resolve_effective_output_device(plan.spec.output_device.as_deref());
+        if let Some(fallback) = &effective.fallback {
+            log::warn!(
+                "Desired output device '{}' is not available; falling back to default output '{}'",
+                fallback.desired,
+                fallback.applied
+            );
+        }
+        let fallback = effective.fallback;
+        let mut plan = plan;
+        plan.spec.output_device = effective.device;
         // Fast path: the requested plan is already running on a healthy
         // engine. Acknowledge without teardown: no mute ramp, no stop/start,
         // no callback wait, no audible gap, and no generation bump to
@@ -1881,7 +1939,13 @@ impl SystemwideController {
 
         match result {
             Ok(_) => {
-                self.system_state.lock().commit_applied(&plan);
+                match &fallback {
+                    Some(fallback) => self
+                        .system_state
+                        .lock()
+                        .commit_fallback_applied(&plan, Some(fallback.desired.clone())),
+                    None => self.system_state.lock().commit_applied(&plan),
+                }
                 self.sync_live_chain_to_current_profile(true);
                 log::info!("Driver plugin chain loaded successfully");
 
@@ -1894,8 +1958,17 @@ impl SystemwideController {
                 Response::ok_empty()
             }
             Err(e) => {
-                log::error!("Failed to load driver plugins: {}", e);
-                Response::err(format!("Failed to load plugin chain: {}", e))
+                // The engine reports a missing output device generically once
+                // its manager thread has exited. Name the absent device so the
+                // cold-start retry matcher, the latched fault, and installers
+                // see the actionable cause instead of "Engine thread exited
+                // unexpectedly".
+                let clarified = super::misc::clarify_device_absence_error(
+                    plan.spec.output_device.as_deref(),
+                    &e,
+                );
+                log::error!("Failed to load driver plugins: {}", clarified);
+                Response::err(format!("Failed to load plugin chain: {}", clarified))
             }
         }
     }
@@ -2287,15 +2360,24 @@ impl SystemwideController {
         static AVAILABLE_PLUGINS: OnceLock<Value> = OnceLock::new();
 
         let available = AVAILABLE_PLUGINS.get_or_init(|| {
+            // Types withheld from the user-facing picker. Everything else in
+            // `PluginType::all()` is served, matching the player pickers:
+            // - `loudness_monitor`: daemon-owned metering, auto-injected at
+            //   both chain boundaries; user instances are stripped from racks
+            //   and rejected from graphs, so offering it would be dishonest.
+            // - `spectrum_analyzer`: daemon-owned system type, rejected from
+            //   graphs, with no daemon data path exposing spectrum readings.
+            // - `resampler` / `hal_input` / `hal_output`: infrastructure
+            //   with non-generic picker exposure, never in `all()`; kept as
+            //   defense if that ever changes.
+            // - `fletcher_munson`: superseded by `loudness_compensation`
+            //   (also omitted from the canonical player categories).
             let excluded = [
                 "loudness_monitor",
                 "spectrum_analyzer",
                 "resampler",
                 "hal_input",
                 "hal_output",
-                "band_split",
-                "band_merge",
-                "ab_compare",
                 "fletcher_munson",
             ];
 
@@ -3015,12 +3097,9 @@ impl SystemwideController {
     }
 
     pub(super) fn handle_set_encryption(&self, enabled: bool) -> Response {
-        if enabled {
-            return Response::err(
-                "Encrypted realtime transport is unavailable: the Swift HAL CryptoKit path allocates; encryption remains disabled until a caller-buffer AEAD implementation is available",
-            );
-        }
-
+        // The HAL realtime path is allocation-free (caller buffers +
+        // RealtimeChaChaPoly), so enabling is a supported operation. Builds
+        // without a session cipher still refuse via the guard below.
         let mut key_manager = self.key_manager.lock();
         key_manager.set_enabled(enabled);
 

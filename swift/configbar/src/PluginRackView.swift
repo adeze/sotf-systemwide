@@ -591,8 +591,12 @@ struct LinearGraphRackEditorView: View {
                 Text("Linear graph").font(.caption).foregroundColor(.secondary)
                 Spacer()
                 Menu {
-                    ForEach(availablePlugins) { plugin in
-                        Button(plugin.name) { appendNode(plugin) }
+                    ForEach(groupPluginsByCategory(availablePlugins)) { category in
+                        Section(header: Text(category.name)) {
+                            ForEach(category.plugins) { plugin in
+                                Button(plugin.name) { appendNode(plugin) }
+                            }
+                        }
                     }
                 } label: {
                     Label("Add Plugin", systemImage: "plus.circle")
@@ -785,9 +789,13 @@ struct PluginGraphEditorView: View {
                     .foregroundColor(.secondary)
                 Spacer()
                 Menu {
-                    ForEach(availablePlugins) { plugin in
-                        Button(plugin.name) {
-                            addNode(plugin)
+                    ForEach(groupPluginsByCategory(availablePlugins)) { category in
+                        Section(header: Text(category.name)) {
+                            ForEach(category.plugins) { plugin in
+                                Button(plugin.name) {
+                                    addNode(plugin)
+                                }
+                            }
                         }
                     }
                 } label: {

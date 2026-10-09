@@ -586,6 +586,180 @@ pub(super) fn wait_for_output_device(
     }
 }
 
+/// Rewrite a pipeline-start failure into a device-availability error when the
+/// requested output device is not enumerated.
+///
+/// The engine reports device absence generically once its manager thread has
+/// exited ("Engine thread exited unexpectedly"): the response channel
+/// disconnects before the thread records its detailed `last_error`, so the
+/// detail never reaches the caller. Without the rewrite, the cold-start retry
+/// matcher cannot recognise a device race and the latched fault names no
+/// device. Errors that already carry device-absence markers, empty requests,
+/// and enumeration failures pass through unchanged.
+pub(super) fn clarify_device_absence_error(
+    desired_device: Option<&str>,
+    engine_error: &str,
+) -> String {
+    if startup_error_is_device_availability(Some(engine_error)) {
+        return engine_error.to_string();
+    }
+    let Some(desired) = desired_device
+        .map(str::trim)
+        .filter(|desired| !desired.is_empty())
+    else {
+        return engine_error.to_string();
+    };
+    let enumerated = match list_audio_devices() {
+        Ok(devices) => devices,
+        Err(_) => return engine_error.to_string(),
+    };
+    let names: Vec<&str> = enumerated
+        .iter()
+        .filter_map(|device| device.get("name").and_then(Value::as_str))
+        .collect();
+    clarify_device_absence_error_with_devices(desired, engine_error, &names)
+}
+
+/// Pure core of [`clarify_device_absence_error`] over an already-enumerated
+/// device-name list, so the rewrite rules stay unit-testable without audio
+/// hardware.
+fn clarify_device_absence_error_with_devices(
+    desired: &str,
+    engine_error: &str,
+    enumerated_names: &[&str],
+) -> String {
+    if device_is_enumerated(desired, enumerated_names) {
+        return engine_error.to_string();
+    }
+    format!(
+        "Selected output device '{desired}' is not available: Audio device '{desired}' not found. Available output devices ({} total): {}. Engine reported: {engine_error}",
+        enumerated_names.len(),
+        enumerated_names.join(", "),
+    )
+}
+
+/// True when `name` matches an enumerated device, tolerating the ASIO prefix
+/// gap between the stored name and the enumerated name.
+pub(super) fn device_is_enumerated(name: &str, enumerated_names: &[&str]) -> bool {
+    let stripped = sotf_audio::devices::strip_asio_prefix(name);
+    enumerated_names
+        .iter()
+        .any(|candidate| *candidate == name || *candidate == stripped)
+}
+
+/// One enumerated output device for fallback selection.
+#[derive(Clone, Debug)]
+pub(super) struct FallbackCandidate {
+    pub(super) name: String,
+    pub(super) is_default: bool,
+}
+
+/// A substituted output route: the desired device was missing, so the engine
+/// opened the fallback instead. Callers preserve the desired device so a
+/// replugged device can be re-selected without losing the intent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct OutputDeviceFallback {
+    pub(super) desired: String,
+    pub(super) applied: String,
+}
+
+/// Engine-start device resolution: what to open, plus the fallback record
+/// when a missing desired device was substituted.
+pub(super) struct EffectiveOutputDevice {
+    pub(super) device: Option<String>,
+    pub(super) fallback: Option<OutputDeviceFallback>,
+}
+
+/// Pick the fallback output: the system default when it is a safe physical
+/// device, otherwise the first safe enumerated device. Virtual/loopback
+/// devices never qualify: processed audio must not be routed back into the
+/// capture device.
+pub(super) fn select_fallback_output_device(candidates: &[FallbackCandidate]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_default && is_safe_output_device_name(&candidate.name))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| is_safe_output_device_name(&candidate.name))
+        })
+        .map(|candidate| candidate.name.clone())
+}
+
+/// Resolve the device an engine start should open. A missing desired device
+/// degrades to the default-safe fallback instead of failing the start; the
+/// fallback record lets the caller preserve the desired device. `None`
+/// (engine chooses), present devices, unsafe names (owned by the
+/// prepare-level virtual-device rule), and enumeration failures pass through
+/// unchanged.
+pub(super) fn resolve_effective_output_device(
+    desired_device: Option<&str>,
+) -> EffectiveOutputDevice {
+    let passthrough = |device: Option<String>| EffectiveOutputDevice {
+        device,
+        fallback: None,
+    };
+    let Some(desired) = desired_device
+        .map(str::trim)
+        .filter(|desired| !desired.is_empty())
+    else {
+        return passthrough(None);
+    };
+    if !is_safe_output_device_name(desired) {
+        return passthrough(Some(desired.to_string()));
+    }
+    let enumerated = match list_audio_devices() {
+        Ok(devices) => devices,
+        Err(_) => return passthrough(Some(desired.to_string())),
+    };
+    let mut candidates = Vec::new();
+    for device in &enumerated {
+        let Some(name) = device.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        candidates.push(FallbackCandidate {
+            name: name.to_string(),
+            is_default: device
+                .get("is_default")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+    resolve_effective_output_device_with_candidates(desired, &candidates)
+}
+
+/// Pure core of [`resolve_effective_output_device`] over an
+/// already-enumerated candidate list, so substitution stays unit-testable
+/// without audio hardware.
+fn resolve_effective_output_device_with_candidates(
+    desired: &str,
+    candidates: &[FallbackCandidate],
+) -> EffectiveOutputDevice {
+    let names: Vec<&str> = candidates
+        .iter()
+        .map(|candidate| candidate.name.as_str())
+        .collect();
+    if device_is_enumerated(desired, &names) {
+        return EffectiveOutputDevice {
+            device: Some(desired.to_string()),
+            fallback: None,
+        };
+    }
+    match select_fallback_output_device(candidates) {
+        Some(applied) => EffectiveOutputDevice {
+            device: Some(applied.clone()),
+            fallback: Some(OutputDeviceFallback {
+                desired: desired.to_string(),
+                applied,
+            }),
+        },
+        None => EffectiveOutputDevice {
+            device: Some(desired.to_string()),
+            fallback: None,
+        },
+    }
+}
+
 /// Elevate the calling daemon-owned thread to audio-work priority.
 ///
 /// The engine's decoder/processing/playback threads already do this for
@@ -687,7 +861,11 @@ pub(super) fn list_audio_devices() -> Result<Vec<serde_json::Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_daemon_instance_lock, startup_error_is_device_availability, wait_for_output_device,
+        FallbackCandidate, acquire_daemon_instance_lock, clarify_device_absence_error,
+        clarify_device_absence_error_with_devices, device_is_enumerated, list_audio_devices,
+        resolve_effective_output_device, resolve_effective_output_device_with_candidates,
+        select_fallback_output_device, startup_error_is_device_availability,
+        wait_for_output_device,
     };
     #[cfg(unix)]
     use super::{bind_unix_socket, socket_is_unix_socket};
@@ -827,6 +1005,162 @@ mod tests {
         assert!(!startup_error_is_device_availability(Some(
             "Failed to parse loudness compensation params: invalid type"
         )));
+    }
+
+    #[test]
+    fn clarify_device_absence_rewrites_generic_errors_for_missing_devices() {
+        let rewritten = clarify_device_absence_error_with_devices(
+            "EVO8",
+            "Engine thread exited unexpectedly",
+            &["Mac mini Speakers", "UltraFine Pro"],
+        );
+        assert!(rewritten.contains("Selected output device 'EVO8' is not available"));
+        assert!(rewritten.contains("Audio device 'EVO8' not found"));
+        assert!(rewritten.contains("Mac mini Speakers, UltraFine Pro"));
+        assert!(rewritten.contains("Engine reported: Engine thread exited unexpectedly"));
+        assert!(startup_error_is_device_availability(Some(&rewritten)));
+    }
+
+    #[test]
+    fn clarify_device_absence_passes_through_when_no_rewrite_applies() {
+        // Errors that already name the device race keep the engine wording.
+        let detailed =
+            "Selected output device 'EVO8' is not available: Audio device 'EVO8' not found";
+        assert_eq!(
+            clarify_device_absence_error(Some("EVO8"), detailed),
+            detailed
+        );
+        // Empty requests cannot name a missing device.
+        assert_eq!(clarify_device_absence_error(None, "boom"), "boom");
+        assert_eq!(clarify_device_absence_error(Some("  "), "boom"), "boom");
+        // A present device means the engine failed for another reason.
+        assert_eq!(
+            clarify_device_absence_error_with_devices(
+                "EVO8",
+                "Engine thread exited unexpectedly",
+                &["EVO8", "Mac mini Speakers"],
+            ),
+            "Engine thread exited unexpectedly"
+        );
+        // ASIO prefix differences must not read as absence.
+        assert_eq!(
+            clarify_device_absence_error_with_devices(
+                "ASIO:EVO8",
+                "Engine thread exited unexpectedly",
+                &["EVO8"],
+            ),
+            "Engine thread exited unexpectedly"
+        );
+    }
+
+    fn candidate(name: &str, is_default: bool) -> FallbackCandidate {
+        FallbackCandidate {
+            name: name.to_string(),
+            is_default,
+        }
+    }
+
+    #[test]
+    fn fallback_prefers_the_safe_default_output() {
+        let candidates = vec![
+            candidate("EVO8", false),
+            candidate("Mac mini Speakers", true),
+        ];
+        assert_eq!(
+            select_fallback_output_device(&candidates).as_deref(),
+            Some("Mac mini Speakers")
+        );
+    }
+
+    #[test]
+    fn fallback_skips_a_virtual_default_output() {
+        // The system default is routinely the SotF virtual device itself;
+        // opening it as the real output would feed processed audio back
+        // into capture.
+        let candidates = vec![
+            candidate("SotF Virtual Audio", true),
+            candidate("USB audio CODEC", false),
+        ];
+        assert_eq!(
+            select_fallback_output_device(&candidates).as_deref(),
+            Some("USB audio CODEC")
+        );
+    }
+
+    #[test]
+    fn fallback_rejects_all_virtual_or_empty_enumeration() {
+        let candidates = vec![
+            candidate("SotF Virtual Audio", true),
+            candidate("BlackHole", false),
+        ];
+        assert_eq!(select_fallback_output_device(&candidates), None);
+        assert_eq!(select_fallback_output_device(&[]), None);
+    }
+
+    #[test]
+    fn effective_device_substitutes_only_a_missing_safe_desired_device() {
+        let candidates = vec![
+            candidate("SotF Virtual Audio", true),
+            candidate("Mac mini Speakers", false),
+        ];
+        // Present desired passes through untouched.
+        let effective =
+            resolve_effective_output_device_with_candidates("Mac mini Speakers", &candidates);
+        assert_eq!(effective.device.as_deref(), Some("Mac mini Speakers"));
+        assert!(effective.fallback.is_none());
+        // Missing desired degrades to the default-safe output.
+        let effective = resolve_effective_output_device_with_candidates("EVO8", &candidates);
+        assert_eq!(effective.device.as_deref(), Some("Mac mini Speakers"));
+        let fallback = effective.fallback.expect("fallback record");
+        assert_eq!(fallback.desired, "EVO8");
+        assert_eq!(fallback.applied, "Mac mini Speakers");
+        // Nothing safe enumerated: pass through so the start fails loudly.
+        let effective = resolve_effective_output_device_with_candidates("EVO8", &[]);
+        assert_eq!(effective.device.as_deref(), Some("EVO8"));
+        assert!(effective.fallback.is_none());
+        // ASIO prefix gap still counts as present.
+        let candidates = vec![candidate("EVO8", false)];
+        let effective = resolve_effective_output_device_with_candidates("ASIO:EVO8", &candidates);
+        assert_eq!(effective.device.as_deref(), Some("ASIO:EVO8"));
+        assert!(effective.fallback.is_none());
+    }
+
+    #[test]
+    fn effective_device_passes_through_without_enumeration() {
+        // None and unsafe names never consult enumeration: the engine owns
+        // the former, the prepare-level virtual-device rule the latter.
+        let effective = resolve_effective_output_device(None);
+        assert_eq!(effective.device, None);
+        assert!(effective.fallback.is_none());
+        let effective = resolve_effective_output_device(Some("SotF Virtual Audio"));
+        assert_eq!(effective.device.as_deref(), Some("SotF Virtual Audio"));
+        assert!(effective.fallback.is_none());
+        assert!(!device_is_enumerated("EVO8", &[]));
+        assert!(device_is_enumerated(
+            "ASIO:EVO8",
+            &["Mac mini Speakers", "EVO8"]
+        ));
+    }
+
+    #[test]
+    fn clarify_device_absence_uses_live_enumeration_when_available() {
+        // End-to-end through real CoreAudio/CPAL enumeration. Headless
+        // machines enumerate nothing and must pass the error through; audio
+        // machines must rewrite a generic failure for an absent device into
+        // a retryable, actionable fault.
+        let engine_error = "Engine thread exited unexpectedly";
+        let result =
+            clarify_device_absence_error(Some("definitely-not-a-real-device-xyz"), engine_error);
+        match list_audio_devices() {
+            Ok(_) => {
+                assert!(
+                    result.contains("definitely-not-a-real-device-xyz' is not available"),
+                    "live enumeration must drive the rewrite: {result}"
+                );
+                assert!(startup_error_is_device_availability(Some(&result)));
+            }
+            Err(_) => assert_eq!(result, engine_error),
+        }
     }
 
     #[test]

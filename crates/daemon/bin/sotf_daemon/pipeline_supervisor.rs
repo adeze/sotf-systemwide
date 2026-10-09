@@ -231,6 +231,20 @@ impl PipelineSupervisor {
         });
     }
 
+    /// Commit a plan whose output device was substituted by fallback: the
+    /// applied spec records what the engine opened while the desired device
+    /// keeps the missing selection, so status shows the divergence and a
+    /// replugged device can be re-selected. Single generation bump: the
+    /// restore is part of the same transition.
+    pub(super) fn commit_fallback_applied(
+        &mut self,
+        plan: &PipelinePlan,
+        desired_output_device: Option<String>,
+    ) {
+        self.commit_applied(plan);
+        self.desired.output_device = desired_output_device;
+    }
+
     pub(super) fn set_desired_output_device(
         &mut self,
         output_device: Option<String>,

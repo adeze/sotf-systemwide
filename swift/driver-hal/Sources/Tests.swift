@@ -85,7 +85,7 @@ final class HALDriverTests {
         if testEncryptionFrameCounterNonceUniqueness() { passed += 1 } else { failed += 1 }
         if testRealtimeCipherMatchesCryptoKit() { passed += 1 } else { failed += 1 }
         if testKeyManagerFingerprint() { passed += 1 } else { failed += 1 }
-        if testSharedMemoryEncryptedRealtimeIsRejected() { passed += 1 } else { failed += 1 }
+        if testSharedMemoryEncryptedRealtimeRoundTrips() { passed += 1 } else { failed += 1 }
 
         halLog("Tests complete: \(passed) passed, \(failed) failed")
         return failed == 0
@@ -1217,10 +1217,11 @@ final class HALDriverTests {
         return true
     }
 
-    /// The production Swift HAL must reject encrypted callback transport until
-    /// a caller-buffer AEAD implementation replaces the allocating CryptoKit path.
-    static func testSharedMemoryEncryptedRealtimeIsRejected() -> Bool {
-        halLog("  Test: SharedMemory encrypted realtime transport is rejected")
+    /// The encrypted realtime path is allocation-free (caller buffers +
+    /// RealtimeChaChaPoly), so encrypted frames must roundtrip through the
+    /// shared-memory ring instead of being rejected.
+    static func testSharedMemoryEncryptedRealtimeRoundTrips() -> Bool {
+        halLog("  Test: SharedMemory encrypted realtime transport roundtrips")
 
         let fileManager = FileManager.default
         let tempDir = (NSTemporaryDirectory() as NSString)
@@ -1334,8 +1335,8 @@ final class HALDriverTests {
         let written = input.withUnsafeBufferPointer { ptr in
             sharedMemory.writeAudio(ptr.baseAddress!, frameCount: frames, channelCount: channels)
         }
-        guard written == 0 else {
-            halLog("    FAIL: encrypted write returned \(written), expected rejection")
+        guard written == frames else {
+            halLog("    FAIL: encrypted write returned \(written), expected \(frames)")
             return false
         }
 
@@ -1343,13 +1344,13 @@ final class HALDriverTests {
         let read = output.withUnsafeMutableBufferPointer { ptr in
             sharedMemory.readAudio(ptr.baseAddress!, frameCount: frames, channelCount: channels)
         }
-        guard read == 0 else {
-            halLog("    FAIL: encrypted read returned \(read), expected rejection")
+        guard read == frames else {
+            halLog("    FAIL: encrypted read returned \(read), expected \(frames)")
             return false
         }
 
-        guard output.allSatisfy({ $0 == 0 }) else {
-            halLog("    FAIL: rejected encrypted read did not clear output")
+        guard output == input else {
+            halLog("    FAIL: encrypted roundtrip mismatch")
             return false
         }
 

@@ -26,7 +26,7 @@ struct PluginEditorView: View {
     }
 
     var body: some View {
-        if !descriptors.isEmpty && pluginType != "eq" && pluginType != "delay" {
+        if !descriptors.isEmpty && pluginType != "eq" && pluginType != "delay" && pluginType != "matrix" {
             DescriptorPluginEditor(
                 pluginType: pluginType,
                 parameters: parameters,
@@ -43,6 +43,12 @@ struct PluginEditorView: View {
                 )
             case "delay":
                 DelayEditor(
+                    parameters: parameters,
+                    channelCount: channelCount,
+                    onUpdate: onUpdate
+                )
+            case "matrix":
+                MatrixEditor(
                     parameters: parameters,
                     channelCount: channelCount,
                     onUpdate: onUpdate
@@ -1434,5 +1440,487 @@ struct GenericPluginEditor: View {
         }
         parseError = nil
         onUpdate(parsed)
+    }
+}
+
+// MARK: - Matrix Editor
+
+/// Routing-matrix editor mirroring the app-gpui matrix picker: a preset
+/// menu, input/output route selectors with a gain/polarity editor for the
+/// selected route, an OUT×IN gain grid, and a mute/solo/dim sidebar per
+/// output group. Gains are linear coefficients; the grid shows dB text.
+struct MatrixEditor: View {
+    let parameters: [String: Any]
+    let channelCount: Int
+    let onUpdate: ([String: Any]) -> Void
+
+    @State private var draftParameters: [String: Any] = [:]
+    @State private var inputChannels = 2
+    @State private var outputChannels = 2
+    @State private var gains: [Double] = []
+    @State private var channelStates: [MatrixChannelState] = []
+    @State private var selectedInput = 0
+    @State private var selectedOutput = 0
+
+    private let cellSize: CGFloat = 48
+    private let labelWidth: CGFloat = 44
+
+    private var renderInputs: Int {
+        min(inputChannels, ConfigBarMatrixParameters.maxRenderChannels)
+    }
+
+    private var renderOutputs: Int {
+        min(outputChannels, ConfigBarMatrixParameters.maxRenderChannels)
+    }
+
+    private var isTruncated: Bool {
+        renderInputs < inputChannels || renderOutputs < outputChannels
+    }
+
+    private var detectedPreset: String {
+        ConfigBarMatrixParameters.detectPreset(
+            inputChannels: inputChannels,
+            outputChannels: outputChannels,
+            gains: gains
+        )
+    }
+
+    private var selectedGain: Double {
+        let index = ConfigBarMatrixParameters.cellIndex(
+            input: selectedInput,
+            output: selectedOutput,
+            inputCount: inputChannels
+        )
+        guard gains.indices.contains(index) else { return 0.0 }
+        return gains[index]
+    }
+
+    private var selectedRouteOn: Bool {
+        selectedGain != 0.0
+    }
+
+    private var selectedPolarityNegative: Bool {
+        selectedGain < 0
+    }
+
+    private var selectedGainDb: Double {
+        min(
+            max(
+                ConfigBarMatrixParameters.linearToDb(selectedGain),
+                ConfigBarMatrixParameters.minDb
+            ),
+            ConfigBarMatrixParameters.maxDb
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            presetRow
+            routeRow
+            ScrollView(.horizontal, showsIndicators: true) {
+                HStack(alignment: .top, spacing: 12) {
+                    gainGrid
+                    Divider()
+                    msdSidebar
+                }
+                .padding(.vertical, 2)
+            }
+            Text("Off silences the route; On starts at 0 dB. Double-click a cell to clear it.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            if isTruncated {
+                Text("Showing the first \(ConfigBarMatrixParameters.maxRenderChannels) channels; the full matrix stays intact.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .onAppear {
+            draftParameters = parameters
+            let fallback = min(max(channelCount, 1), ConfigBarMatrixParameters.maxRenderChannels)
+            inputChannels = ConfigBarMatrixParameters.inputChannels(parameters, fallback: fallback)
+            outputChannels = ConfigBarMatrixParameters.outputChannels(parameters, fallback: fallback)
+            gains = ConfigBarMatrixParameters.gains(
+                parameters,
+                inputChannels: inputChannels,
+                outputChannels: outputChannels
+            )
+            channelStates = ConfigBarMatrixParameters.channelStates(
+                parameters,
+                outputChannels: outputChannels
+            )
+            selectedInput = 0
+            selectedOutput = 0
+        }
+    }
+
+    private var presetRow: some View {
+        HStack(spacing: 8) {
+            Text("Preset")
+                .frame(width: 150, alignment: .trailing)
+                .font(.caption)
+            Picker("Preset", selection: presetBinding) {
+                ForEach(presetOptions, id: \.self) { preset in
+                    Text(preset)
+                        .tag(preset)
+                        .disabled(!isPresetSelectable(preset))
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 180)
+            .labelsHidden()
+        }
+    }
+
+    private var presetOptions: [String] {
+        ConfigBarMatrixParameters.availablePresets(
+            inputChannels: inputChannels,
+            outputChannels: outputChannels
+        ) + ["Custom"]
+    }
+
+    /// "Custom" is display-only; M/S presets need a stereo pair up front.
+    private func isPresetSelectable(_ preset: String) -> Bool {
+        if preset == "Custom" {
+            return false
+        }
+        if (preset == "M/S Encode" || preset == "M/S Decode") && inputChannels > 2 {
+            return false
+        }
+        return true
+    }
+
+    private var presetBinding: Binding<String> {
+        Binding(
+            get: { detectedPreset },
+            set: { preset in
+                guard preset != "Custom",
+                      preset != detectedPreset,
+                      presetOptions.contains(preset) else { return }
+                gains = ConfigBarMatrixParameters.applyPreset(
+                    preset,
+                    inputChannels: inputChannels,
+                    outputChannels: outputChannels
+                )
+                emit()
+            }
+        )
+    }
+
+    private var routeRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Input")
+                    .frame(width: 150, alignment: .trailing)
+                    .font(.caption)
+                Picker("Input", selection: $selectedInput) {
+                    ForEach(0..<inputChannels, id: \.self) { index in
+                        Text(ConfigBarMatrixParameters.channelLabel(index: index, total: inputChannels))
+                            .tag(index)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 120)
+                .labelsHidden()
+                Text("Output")
+                    .font(.caption)
+                Picker("Output", selection: $selectedOutput) {
+                    ForEach(0..<outputChannels, id: \.self) { index in
+                        Text(ConfigBarMatrixParameters.channelLabel(index: index, total: outputChannels))
+                            .tag(index)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 120)
+                .labelsHidden()
+            }
+            HStack(spacing: 8) {
+                Text("Route")
+                    .frame(width: 150, alignment: .trailing)
+                    .font(.caption)
+                Picker("Route", selection: routeBinding) {
+                    Text("Off").tag(false)
+                    Text("On").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 110)
+                .labelsHidden()
+                Text("Polarity")
+                    .font(.caption)
+                Picker("Polarity", selection: polarityBinding) {
+                    Text("+").tag(false)
+                    Text("−").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 80)
+                .labelsHidden()
+                .disabled(!selectedRouteOn)
+                Text("Gain")
+                    .font(.caption)
+                Slider(
+                    value: gainDbBinding,
+                    in: ConfigBarMatrixParameters.minDb...ConfigBarMatrixParameters.maxDb,
+                    step: 0.1
+                )
+                .frame(width: 140)
+                .disabled(!selectedRouteOn)
+                TextField("dB", value: gainDbBinding, format: .number)
+                    .frame(width: 56)
+                    .multilineTextAlignment(.trailing)
+                    .disabled(!selectedRouteOn)
+                Text("dB")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private var routeBinding: Binding<Bool> {
+        Binding(
+            get: { selectedRouteOn },
+            set: { on in
+                if on {
+                    setGain(selectedRouteOn ? selectedGain : 1.0)
+                } else {
+                    setGain(0.0)
+                }
+            }
+        )
+    }
+
+    private var polarityBinding: Binding<Bool> {
+        Binding(
+            get: { selectedPolarityNegative },
+            set: { negative in
+                setGain(negative ? -abs(selectedGain) : abs(selectedGain))
+            }
+        )
+    }
+
+    private var gainDbBinding: Binding<Double> {
+        Binding(
+            get: { selectedGainDb },
+            set: { db in
+                let polarity = selectedGain < 0 ? -1.0 : 1.0
+                setGain(polarity * ConfigBarMatrixParameters.dbToLinear(db))
+            }
+        )
+    }
+
+    private var gainGrid: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 2) {
+                Text("OUT\\IN")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .frame(width: labelWidth, height: 20)
+                ForEach(0..<renderInputs, id: \.self) { input in
+                    Text(ConfigBarMatrixParameters.channelLabel(index: input, total: inputChannels))
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: cellSize, height: 20)
+                }
+            }
+            ForEach(0..<renderOutputs, id: \.self) { output in
+                HStack(spacing: 2) {
+                    Text(ConfigBarMatrixParameters.channelLabel(index: output, total: outputChannels))
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: labelWidth, height: cellSize)
+                    ForEach(0..<renderInputs, id: \.self) { input in
+                        MatrixCellButton(
+                            gain: cellGain(input: input, output: output),
+                            isSelected: input == selectedInput && output == selectedOutput,
+                            cellSize: cellSize,
+                            onSelect: {
+                                selectedInput = input
+                                selectedOutput = output
+                            },
+                            onClear: { clearCell(input: input, output: output) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var msdSidebar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("M S D")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.secondary)
+                .frame(height: 20)
+            ForEach(Array(outputGroups.enumerated()), id: \.offset) { _, group in
+                let visible = group.channels.filter { $0 < renderOutputs }
+                if !visible.isEmpty {
+                    VStack(spacing: 4) {
+                        if group.channels.count > 1 {
+                            Text(group.name)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        HStack(spacing: 6) {
+                            msdButton(label: "M", color: .red, active: groupMuted(group.channels)) {
+                                toggleMute(group.channels)
+                            }
+                            msdButton(label: "S", color: .yellow, active: groupSoloed(group.channels)) {
+                                toggleSolo(group.channels)
+                            }
+                            msdButton(label: "D", color: .blue, active: groupDimmed(group.channels)) {
+                                toggleDim(group.channels)
+                            }
+                        }
+                    }
+                    .frame(height: CGFloat(visible.count) * (cellSize + 2) - 2)
+                }
+            }
+        }
+    }
+
+    private var outputGroups: [(name: String, channels: [Int])] {
+        ConfigBarMatrixParameters.outputGroups(total: outputChannels)
+    }
+
+    private func msdButton(
+        label: String,
+        color: Color,
+        active: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.caption2.weight(.bold))
+                .foregroundColor(active ? .white : .secondary)
+                .frame(width: 22, height: 22)
+                .background(active ? color : Color.gray.opacity(0.12))
+                .cornerRadius(4)
+        }
+        .buttonStyle(.plain)
+        .help("\(label == "M" ? "Mute" : label == "S" ? "Solo" : "Dim") output group")
+    }
+
+    private func cellGain(input: Int, output: Int) -> Double {
+        let index = ConfigBarMatrixParameters.cellIndex(
+            input: input,
+            output: output,
+            inputCount: inputChannels
+        )
+        guard gains.indices.contains(index) else { return 0.0 }
+        return gains[index]
+    }
+
+    private func setGain(_ gain: Double) {
+        let index = ConfigBarMatrixParameters.cellIndex(
+            input: selectedInput,
+            output: selectedOutput,
+            inputCount: inputChannels
+        )
+        guard gains.indices.contains(index), gain.isFinite else { return }
+        gains[index] = gain
+        emit()
+    }
+
+    private func clearCell(input: Int, output: Int) {
+        let index = ConfigBarMatrixParameters.cellIndex(
+            input: input,
+            output: output,
+            inputCount: inputChannels
+        )
+        guard gains.indices.contains(index) else { return }
+        gains[index] = 0.0
+        if channelStates.indices.contains(output) {
+            channelStates[output] = MatrixChannelState()
+        }
+        emit()
+    }
+
+    private func groupMuted(_ channels: [Int]) -> Bool {
+        channels.contains { channelStates.indices.contains($0) && channelStates[$0].muted }
+    }
+
+    private func groupSoloed(_ channels: [Int]) -> Bool {
+        channels.contains { channelStates.indices.contains($0) && channelStates[$0].soloed }
+    }
+
+    private func groupDimmed(_ channels: [Int]) -> Bool {
+        channels.contains { channelStates.indices.contains($0) && channelStates[$0].dimmed }
+    }
+
+    private func toggleMute(_ channels: [Int]) {
+        let next = !groupMuted(channels)
+        for channel in channels where channelStates.indices.contains(channel) {
+            channelStates[channel].muted = next
+        }
+        emit()
+    }
+
+    private func toggleSolo(_ channels: [Int]) {
+        let next = !groupSoloed(channels)
+        for channel in channels where channelStates.indices.contains(channel) {
+            channelStates[channel].soloed = next
+        }
+        emit()
+    }
+
+    private func toggleDim(_ channels: [Int]) {
+        let next = !groupDimmed(channels)
+        for channel in channels where channelStates.indices.contains(channel) {
+            channelStates[channel].dimmed = next
+        }
+        emit()
+    }
+
+    private func emit() {
+        draftParameters = ConfigBarMatrixParameters.applyingMatrix(
+            draftParameters,
+            inputChannels: inputChannels,
+            outputChannels: outputChannels,
+            gains: gains,
+            channelStates: channelStates
+        )
+        onUpdate(draftParameters)
+    }
+}
+
+private struct MatrixCellButton: View {
+    let gain: Double
+    let isSelected: Bool
+    let cellSize: CGFloat
+    let onSelect: () -> Void
+    let onClear: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            Text(ConfigBarMatrixParameters.formatGainDb(gain))
+                .font(.caption2.weight(isActive ? .semibold : .regular))
+                .foregroundColor(isActive ? .primary : .secondary)
+                .frame(width: cellSize, height: cellSize)
+                .background(background)
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(isSelected ? Color.accentColor : Color.gray.opacity(0.3), lineWidth: isSelected ? 2 : 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded { onClear() }
+        )
+        .help("Route gain \(ConfigBarMatrixParameters.formatGainDb(gain)) dB")
+    }
+
+    private var isActive: Bool {
+        abs(gain) > ConfigBarMatrixParameters.silenceThreshold
+    }
+
+    private var background: Color {
+        if isSelected {
+            return Color.accentColor.opacity(0.35)
+        }
+        guard isActive else {
+            return Color.gray.opacity(0.12)
+        }
+        let intensity = min(abs(gain), 1.0)
+        let base = gain < -ConfigBarMatrixParameters.silenceThreshold ? Color.orange : Color.accentColor
+        return base.opacity(0.15 + 0.45 * intensity)
     }
 }

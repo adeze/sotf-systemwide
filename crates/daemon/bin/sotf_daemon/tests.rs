@@ -14,6 +14,7 @@ use super::device_registry::DeviceRegistry;
 use super::driver_manager::DriverManager;
 use super::loudness::{loudness_data_to_json, loudness_info_to_json};
 use super::misc::push_metering_faults;
+use super::misc::resolve_effective_output_device;
 use super::misc::sanitize_user_plugins;
 use super::misc::transport_snapshot_and_faults;
 use super::misc::{
@@ -203,19 +204,20 @@ fn plugin_type_to_engine_str_maps_all_variants() {
 
 #[test]
 fn plugin_type_category_groups_are_consistent() {
-    assert_eq!(plugin_type_category(&PluginType::EQ), "EQ & Tone");
-    assert_eq!(plugin_type_category(&PluginType::Gain), "Utility");
+    // Canonical player grouping
+    // (`sotf_audio_player::plugin_categories::CATEGORIES`): one sample per
+    // category plus the non-picker fallbacks.
     assert_eq!(plugin_type_category(&PluginType::Compressor), "Dynamics");
-    assert_eq!(
-        plugin_type_category(&PluginType::Upmixer),
-        "Spatial & Routing"
-    );
-    assert_eq!(plugin_type_category(&PluginType::Convolution), "Effects");
-    assert_eq!(plugin_type_category(&PluginType::Denoiser), "Restoration");
-    assert_eq!(
-        plugin_type_category(&PluginType::LoudnessMonitor),
-        "Monitoring"
-    );
+    assert_eq!(plugin_type_category(&PluginType::EQ), "EQ & Tone");
+    assert_eq!(plugin_type_category(&PluginType::Gain), "EQ & Tone");
+    assert_eq!(plugin_type_category(&PluginType::Denoiser), "Denoising");
+    assert_eq!(plugin_type_category(&PluginType::Upmixer), "Spatial");
+    assert_eq!(plugin_type_category(&PluginType::Convolution), "Spatial");
+    assert_eq!(plugin_type_category(&PluginType::ABCompare), "Analysis");
+    assert_eq!(plugin_type_category(&PluginType::Crossover), "Routing");
+    assert_eq!(plugin_type_category(&PluginType::BandSplit), "Routing");
+    assert_eq!(plugin_type_category(&PluginType::FletcherMunson), "Legacy");
+    assert_eq!(plugin_type_category(&PluginType::External), "External");
 }
 
 #[test]
@@ -2273,12 +2275,19 @@ mod ipc_safety_tests {
         let response =
             send_owner_ipc_command(&daemon, r#"{"command":"set_encryption","enabled":true}"#);
 
-        assert_eq!(response["success"], false);
-        assert!(
-            response["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("Encrypted realtime transport is unavailable"))
-        );
+        if cfg!(all(target_os = "macos", feature = "hal")) {
+            assert_eq!(response["success"], true, "{response}");
+            assert_eq!(response["data"]["enabled"], true);
+            // No HAL shared memory in unit tests, so the transport stays pending.
+            assert_eq!(response["data"]["transport_state"], "pending");
+        } else {
+            assert_eq!(response["success"], false);
+            assert!(
+                response["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("no session cipher"))
+            );
+        }
     }
 
     #[test]
@@ -2574,6 +2583,253 @@ mod ipc_safety_tests {
             faults
                 .iter()
                 .any(|fault| fault["code"] == "pipeline_recovery_required")
+        );
+    }
+
+    #[test]
+    fn testkit_missing_output_device_suggests_selecting_a_device() {
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(Arc::clone(&state));
+
+        daemon
+            .system_state
+            .lock()
+            .set_desired_output_device(Some("EVO8".to_string()))
+            .expect("safe explicit output name");
+        daemon.system_state.lock().mark_pipeline_recovery(
+            "Failed to load plugin chain: Selected output device 'EVO8' is not available: Audio device 'EVO8' not found",
+        );
+
+        let status = daemon.handle_command(Command::Status);
+        let data = status.data.expect("status data");
+        assert!(
+            data["recovery_actions"]
+                .as_array()
+                .is_some_and(|actions| actions
+                    .iter()
+                    .any(|action| action == "select_output_device")),
+            "missing-device latch must suggest select_output_device: {data}"
+        );
+    }
+
+    #[test]
+    fn testkit_generic_pipeline_fault_does_not_suggest_device_selection() {
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(Arc::clone(&state));
+
+        daemon
+            .system_state
+            .lock()
+            .set_desired_output_device(Some("EVO8".to_string()))
+            .expect("safe explicit output name");
+        daemon.system_state.lock().mark_pipeline_recovery(
+            "Failed to load plugin chain: Engine thread exited unexpectedly",
+        );
+
+        let status = daemon.handle_command(Command::Status);
+        let data = status.data.expect("status data");
+        assert!(
+            !data["recovery_actions"]
+                .as_array()
+                .is_some_and(|actions| actions
+                    .iter()
+                    .any(|action| action == "select_output_device")),
+            "generic latch must not suggest select_output_device: {data}"
+        );
+    }
+
+    #[test]
+    fn testkit_fallback_commit_preserves_desired_and_bumps_once() {
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(Arc::clone(&state));
+
+        let generation_before = daemon.system_state.lock().generation();
+        let mut plan = {
+            let state = daemon.system_state.lock();
+            state.prepare_plan(Vec::new(), 2, 2, 2).expect("valid plan")
+        };
+        plan.spec.output_device = Some("Mac mini Speakers".to_string());
+        daemon
+            .system_state
+            .lock()
+            .commit_fallback_applied(&plan, Some("EVO8".to_string()));
+
+        let state = daemon.system_state.lock();
+        assert_eq!(state.selected_output_device().as_deref(), Some("EVO8"));
+        assert_eq!(
+            state.applied_output_device().as_deref(),
+            Some("Mac mini Speakers")
+        );
+        assert_eq!(state.generation(), generation_before + 1);
+    }
+
+    #[test]
+    fn testkit_snapshot_reports_active_output_fallback_as_warning() {
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(Arc::clone(&state));
+
+        let seed = daemon.handle_command(Command::LoadPlugins {
+            plugins: Vec::new(),
+            input_channels: 2,
+            output_channels: 2,
+        });
+        assert!(seed.success, "failed to seed pipeline: {seed:?}");
+        daemon
+            .manager
+            .lock()
+            .resume()
+            .expect("resume fake HAL silent source after pipeline seed");
+        // Steady state first: the transport faults fire while Playing with
+        // no frames or callbacks yet, which would mask the fallback health
+        // signal.
+        let callbacks_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let engine_state = daemon.manager.lock().get_engine_state();
+            if engine_state.playback_callback_count > 0 && engine_state.playback_frames_received > 0
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < callbacks_deadline,
+                "lab engine never produced playback frames and callbacks"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let mut plan = {
+            let state = daemon.system_state.lock();
+            let spec = state.applied_spec().expect("seed applied");
+            state
+                .prepare_from_spec(spec, state.input_channels())
+                .expect("reprepare applied spec")
+        };
+        plan.spec.output_device = Some("Mac mini Speakers".to_string());
+        daemon
+            .system_state
+            .lock()
+            .commit_fallback_applied(&plan, Some("EVO8".to_string()));
+
+        let snapshot = daemon.handle_command(Command::GetSnapshot);
+        let data = snapshot.data.expect("snapshot data");
+        let faults = data["diagnostics"]["faults"]
+            .as_array()
+            .expect("fault list");
+        let fallback = faults
+            .iter()
+            .find(|fault| fault["code"] == "output_device_fallback")
+            .expect("fallback fault");
+        assert_eq!(fallback["severity"], "warning");
+        assert_eq!(fallback["desired_output_device"], "EVO8");
+        assert_eq!(fallback["applied_output_device"], "Mac mini Speakers");
+        assert_eq!(
+            data["diagnostics"]["health"], "warning",
+            "full fault list: {}",
+            data["diagnostics"]["faults"]
+        );
+    }
+
+    #[test]
+    fn testkit_snapshot_omits_fallback_fault_when_converged_or_idle() {
+        // Converged route while streaming: no fallback fault.
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(Arc::clone(&state));
+        let seed = daemon.handle_command(Command::LoadPlugins {
+            plugins: Vec::new(),
+            input_channels: 2,
+            output_channels: 2,
+        });
+        assert!(seed.success, "failed to seed pipeline: {seed:?}");
+        daemon
+            .manager
+            .lock()
+            .resume()
+            .expect("resume fake HAL silent source after pipeline seed");
+        {
+            let mut plan = {
+                let state = daemon.system_state.lock();
+                let spec = state.applied_spec().expect("seed applied");
+                state
+                    .prepare_from_spec(spec, state.input_channels())
+                    .expect("reprepare applied spec")
+            };
+            plan.spec.output_device = Some("Mac mini Speakers".to_string());
+            daemon.system_state.lock().commit_applied(&plan);
+        }
+        let snapshot = daemon.handle_command(Command::GetSnapshot);
+        let data = snapshot.data.expect("snapshot data");
+        assert!(
+            data["diagnostics"]["faults"]
+                .as_array()
+                .is_some_and(|faults| faults
+                    .iter()
+                    .all(|fault| fault["code"] != "output_device_fallback")),
+            "converged route must not report a fallback: {data}"
+        );
+
+        // Diverged route while idle (stop preserves the stale applied spec):
+        // nothing is playing through the fallback, so no fault.
+        let idle_state = fake_driver_state();
+        let idle_daemon = test_daemon_with_driver(Arc::clone(&idle_state));
+        {
+            let mut plan = {
+                let state = idle_daemon.system_state.lock();
+                state.prepare_plan(Vec::new(), 2, 2, 2).expect("valid plan")
+            };
+            plan.spec.output_device = Some("Mac mini Speakers".to_string());
+            idle_daemon
+                .system_state
+                .lock()
+                .commit_fallback_applied(&plan, Some("EVO8".to_string()));
+        }
+        let snapshot = idle_daemon.handle_command(Command::GetSnapshot);
+        let data = snapshot.data.expect("snapshot data");
+        assert!(
+            data["diagnostics"]["faults"]
+                .as_array()
+                .is_some_and(|faults| faults
+                    .iter()
+                    .all(|fault| fault["code"] != "output_device_fallback")),
+            "idle divergence must not report an active fallback: {data}"
+        );
+    }
+
+    #[test]
+    fn testkit_apply_with_missing_desired_device_uses_effective_output() {
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(Arc::clone(&state));
+        daemon
+            .system_state
+            .lock()
+            .set_desired_output_device(Some("Definitely Missing Physical Output".to_string()))
+            .expect("safe explicit output name");
+
+        // Live expectation: the lab engine opens any device name, so the
+        // apply must succeed on every machine while committing exactly what
+        // the resolver selected for this machine's enumeration.
+        let expected = resolve_effective_output_device(Some("Definitely Missing Physical Output"));
+        let response = daemon.handle_command(Command::LoadPlugins {
+            plugins: Vec::new(),
+            input_channels: 2,
+            output_channels: 2,
+        });
+        assert!(
+            response.success,
+            "fallback apply must succeed: {response:?}"
+        );
+        let state = daemon.system_state.lock();
+        assert_eq!(
+            state.selected_output_device().as_deref(),
+            Some("Definitely Missing Physical Output")
+        );
+        assert_eq!(
+            state.applied_output_device(),
+            expected.device,
+            "applied device must be the resolved effective output"
+        );
+        assert_eq!(
+            expected.fallback.is_some(),
+            state.selected_output_device() != state.applied_output_device(),
+            "fallback record and desired/applied divergence must agree"
         );
     }
 
@@ -3088,6 +3344,53 @@ mod command_roundtrip_tests {
         assert!(plugins[0].get("default_parameters").is_some());
     }
 
+    #[test]
+    fn handle_get_available_plugins_serves_graph_blocks_with_canonical_categories() {
+        // The picker must offer every user-insertable type, including the
+        // graph building blocks, grouped by the canonical player categories.
+        let resp = run_command(Command::GetAvailablePlugins);
+        assert!(resp.success);
+        let data = resp.data.expect("get_available_plugins data");
+        let plugins = data["plugins"].as_array().expect("plugins array");
+        let by_type: std::collections::HashMap<&str, &Value> = plugins
+            .iter()
+            .filter_map(|entry| entry["type"].as_str().map(|type_| (type_, entry)))
+            .collect();
+
+        for (plugin_type, category) in [
+            ("ab_compare", "Analysis"),
+            ("band_split", "Routing"),
+            ("band_merge", "Routing"),
+            ("eq", "EQ & Tone"),
+            ("compressor", "Dynamics"),
+            ("denoiser", "Denoising"),
+            ("upmixer", "Spatial"),
+        ] {
+            let entry = by_type
+                .get(plugin_type)
+                .unwrap_or_else(|| panic!("{plugin_type} missing from available plugins"));
+            assert_eq!(entry["category"], category, "{plugin_type} category");
+            assert!(entry.get("name").is_some());
+            assert!(entry.get("default_parameters").is_some());
+        }
+
+        // Daemon-owned metering, superseded, and infrastructure types stay out.
+        for withheld in [
+            "loudness_monitor",
+            "spectrum_analyzer",
+            "fletcher_munson",
+            "resampler",
+            "hal_input",
+            "hal_output",
+            "external",
+        ] {
+            assert!(
+                !by_type.contains_key(withheld),
+                "{withheld} must stay out of available plugins"
+            );
+        }
+    }
+
     fn test_output_profile(
         id: &str,
         name: &str,
@@ -3423,12 +3726,20 @@ mod command_roundtrip_tests {
     #[serial]
     fn handle_set_encryption_reports_build_capability() {
         let resp = run_command(Command::SetEncryption { enabled: true });
-        assert!(!resp.success);
-        assert!(
-            resp.error
-                .as_deref()
-                .is_some_and(|error| error.contains("Encrypted realtime transport is unavailable"))
-        );
+        if cfg!(all(target_os = "macos", feature = "hal")) {
+            assert!(resp.success, "{resp:?}");
+            let data = resp.data.expect("set_encryption data");
+            assert_eq!(data["enabled"], true);
+            // No HAL shared memory in unit tests, so the transport stays pending.
+            assert_eq!(data["transport_state"], "pending");
+        } else {
+            assert!(!resp.success);
+            assert!(
+                resp.error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("no session cipher"))
+            );
+        }
     }
 
     #[test]

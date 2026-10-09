@@ -660,12 +660,20 @@ fn systemwide_lab_scenario_matrix_over_ipc() {
     );
 
     let encryption_enabled = daemon.send(r#"{"command":"set_encryption","enabled":true}"#);
-    assert_eq!(encryption_enabled["success"], false);
-    assert!(
-        encryption_enabled["error"]
-            .as_str()
-            .is_some_and(|error| { error.contains("Encrypted realtime transport is unavailable") })
+    #[cfg(all(target_os = "macos", feature = "hal"))]
+    assert_eq!(
+        encryption_enabled["success"], true,
+        "enable response: {encryption_enabled}"
     );
+    #[cfg(not(all(target_os = "macos", feature = "hal")))]
+    {
+        assert_eq!(encryption_enabled["success"], false);
+        assert!(
+            encryption_enabled["error"]
+                .as_str()
+                .is_some_and(|error| { error.contains("no session cipher") })
+        );
+    }
     let rotation = daemon.send(r#"{"command":"rotate_encryption_key"}"#);
     #[cfg(all(target_os = "macos", feature = "hal"))]
     assert_eq!(rotation["success"], true, "rotation response: {rotation}");
@@ -680,6 +688,9 @@ fn systemwide_lab_scenario_matrix_over_ipc() {
     }
     let encryption_status = daemon.send(r#"{"command":"encryption_status"}"#);
     assert_eq!(encryption_status["success"], true);
+    #[cfg(all(target_os = "macos", feature = "hal"))]
+    assert_eq!(encryption_status["data"]["enabled"], true);
+    #[cfg(not(all(target_os = "macos", feature = "hal")))]
     assert_eq!(encryption_status["data"]["enabled"], false);
     #[cfg(all(target_os = "macos", feature = "hal"))]
     assert_eq!(encryption_status["data"]["transport_state"], "unavailable");
@@ -687,6 +698,12 @@ fn systemwide_lab_scenario_matrix_over_ipc() {
     assert_eq!(
         encryption_status["data"]["transport_state"],
         "not_applicable"
+    );
+    // Restore the disabled state for the rest of the lab session.
+    let encryption_disabled = daemon.send(r#"{"command":"set_encryption","enabled":false}"#);
+    assert_eq!(
+        encryption_disabled["success"], true,
+        "disable response: {encryption_disabled}"
     );
 
     let reconfigured = daemon

@@ -723,9 +723,9 @@ final class SharedAudioBuffer {
             return 0
         }
 
-        // Check for encryption
+        // Check for encryption. The encrypted path is allocation-free
+        // (caller buffers + RealtimeChaChaPoly), so it is always compiled in.
         if atomicLoad(&header.pointee.encrypted) != 0 {
-#if SOTF_ENABLE_ALLOCATING_REALTIME_ENCRYPTION
             if let cipher = cipherMatchingHeader(header) {
                 let sampleCount = frameCount * channelCount
                 let ciphertextLen = sampleCount * MemoryLayout<Float>.size + 16
@@ -769,7 +769,6 @@ final class SharedAudioBuffer {
                     )
                 }
             }
-#endif
             // If encryption enabled but failed, write silence or return 0
             return 0
         }
@@ -919,9 +918,9 @@ final class SharedAudioBuffer {
             return 0
         }
 
-        // Check for encryption
+        // Check for encryption. The encrypted path is allocation-free
+        // (caller buffers + RealtimeChaChaPoly), so it is always compiled in.
         if atomicLoad(&header.pointee.encrypted) != 0 {
-#if SOTF_ENABLE_ALLOCATING_REALTIME_ENCRYPTION
             if let cipher = cipherMatchingHeader(header) {
                 let requestedSampleCount = frameCount * channelCount
                 let writePos = atomicLoad(&header.pointee.writePosition)
@@ -988,7 +987,6 @@ final class SharedAudioBuffer {
                     }
                 }
             }
-#endif
             // Decryption failed or no key
             memset(buffer, 0, frameCount * channelCount * MemoryLayout<Float>.size)
             return 0

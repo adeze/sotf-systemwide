@@ -113,12 +113,13 @@ capture drivers:
   frame cursors. A block is published with one release store after every
   channel has been copied, so consumers cannot observe a partially published
   multichannel frame.
-- Encrypted realtime HAL transport is disabled until the Swift side has a
-  caller-buffer AEAD implementation. CryptoKit's ChaChaPoly API constructs
-  `Data`, nonce, and sealed-box values, so the daemon rejects attempts to enable
-  encryption and the default HAL callback build rejects encrypted frames rather
-  than violating the allocation-free callback contract. Key observation and
-  reload remain maintenance-queue work.
+- Encrypted realtime HAL transport uses the allocation-free caller-buffer
+  AEAD core (`RealtimeChaChaPoly`, cross-validated against CryptoKit) on the
+  Swift IO path; CryptoKit's `ChaChaPoly` API remains for cold paths, tests,
+  and cross-validation only. The daemon enables encryption via
+  `set_encryption` when a session cipher is available and syncs the flag
+  plus key fingerprint to shared memory. Key observation and reload remain
+  maintenance-queue work.
 - Both the daemon-private key and HAL-readable key copy are published through
   mode-0600, same-directory temporary files and atomically renamed into place.
   The destination is never removed before replacement, so a raced symlink
@@ -141,7 +142,7 @@ capture drivers:
   response, and budget-exceed counts. Current diagnostic budgets are 5 ms / 64
   KiB for metering and 1 s / 256 KiB for pipeline reloads.
 - Playback tracks logical DSP channels separately from the physical CoreAudio stream layout. If a device advertises only a wider native layout, the engine opens the smallest compatible native stream, maps logical channels to its leading outputs, and zero-fills unused outputs; graph validation and UI channel requirements continue to use the logical count.
-- The daemon persists the last successfully applied physical output device in the per-user application-support directory and restores it before cold-start playback. Environment selection remains an explicit override. Missing, invalid, or virtual persisted devices are rejected instead of routing processed audio back into the virtual capture device.
+- The daemon persists the last successfully applied physical output device in the per-user application-support directory and restores it before cold-start playback. Environment selection remains an explicit override. A persisted device that is missing at start degrades to the default-safe output (system default when it is a safe physical device, otherwise the first safe enumerated device) while keeping the missing selection as the desired device; virtual persisted devices are still rejected instead of routing processed audio back into the virtual capture device. The divergence surfaces as an `output_device_fallback` warning fault in snapshots, and the fallback plays its own stored chain, never the missing interface's correction.
 - Configbar enables `SO_NOSIGPIPE` on every daemon socket. A daemon-side close therefore becomes a recoverable `EPIPE`/reconnect result instead of terminating the menu bar process while a configuration mutation is in flight.
 - On macOS, the HAL decoder, DSP processing thread, and playback feeder all run in the engine's soft audio-work QoS class. CPAL/CoreAudio alone owns the hardware callback's hard realtime policy; Linux/Windows feeder scheduling is unchanged.
 - Audio-path wall-clock heartbeat refresh and default debug tracing were
@@ -151,10 +152,13 @@ capture drivers:
   and restart escalation on a utility queue. AppKit state and callbacks return
   to the main queue; `Process.waitUntilExit()` never runs there.
 - The installer owns both per-user LaunchAgents: `org.spinorama.sotf-daemon`
-  and `org.spinorama.sotf-systemwide`. It replaces both plists, starts the
-  daemon immediately, then starts and verifies Configbar after the HAL package
-  lands. launchd output is retained under `~/Library/Logs/SotF`; installation
-  rolls files at 10 MiB so the preceding run remains available as `.1`.
+  and `org.spinorama.sotf-systemwide`. Components install HAL first, then the
+  app, then autolaunch: the driver payload lands and CoreAudio restarts
+  before the daemon starts, so the postinstall smoke test validates the final
+  system state. It replaces both plists, starts the daemon, then starts and
+  verifies Configbar. launchd output is retained under `~/Library/Logs/SotF`;
+  installation rolls files at 10 MiB so the preceding run remains available
+  as `.1`.
 - The production daemon process is owned by the `org.spinorama.sotf-daemon`
   LaunchAgent (`builds/macos/org.spinorama.sotf-daemon.plist`), registered by
   the installer for the console user with `RunAtLoad` plus `KeepAlive`.

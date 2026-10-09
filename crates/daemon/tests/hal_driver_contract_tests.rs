@@ -133,7 +133,7 @@ fn daemon_reconfiguration_uses_negotiated_hal_format() {
 }
 
 #[test]
-fn swift_encrypted_transport_is_disabled_on_realtime_paths() {
+fn swift_encrypted_transport_uses_caller_buffer_aead_on_realtime_paths() {
     let shared_memory =
         read_repo_file("sotf-systemwide/swift/driver-hal/Sources/SharedMemory.swift");
     let driver = read_repo_file("sotf-systemwide/swift/driver-hal/Sources/SotFHALDriver.swift");
@@ -145,9 +145,20 @@ fn swift_encrypted_transport_is_disabled_on_realtime_paths() {
     let io_body = function_body(&driver, "private func driverDoIOOperation");
 
     assert!(
-        write_audio.contains("#if SOTF_ENABLE_ALLOCATING_REALTIME_ENCRYPTION")
-            && read_audio.contains("#if SOTF_ENABLE_ALLOCATING_REALTIME_ENCRYPTION"),
-        "allocating CryptoKit transport must be compiled out of default realtime paths"
+        !write_audio.contains("SOTF_ENABLE_ALLOCATING_REALTIME_ENCRYPTION")
+            && !read_audio.contains("SOTF_ENABLE_ALLOCATING_REALTIME_ENCRYPTION"),
+        "the encrypted realtime path is allocation-free and must not be compiled out"
+    );
+    assert!(
+        write_audio.contains("encryptToBuffer") && read_audio.contains("decryptFromBuffer"),
+        "realtime transport must use the caller-buffer AEAD API"
+    );
+    assert!(
+        !write_audio.contains("ChaChaPoly.seal")
+            && !write_audio.contains("ChaChaPoly.open")
+            && !read_audio.contains("ChaChaPoly.seal")
+            && !read_audio.contains("ChaChaPoly.open"),
+        "allocating CryptoKit calls must stay off the realtime paths"
     );
     assert!(
         !cipher_match.contains("checkAndReload") && !io_body.contains("checkAndReload"),
@@ -158,8 +169,12 @@ fn swift_encrypted_transport_is_disabled_on_realtime_paths() {
         "key-file observation belongs on the HAL maintenance queue"
     );
     assert!(
-        daemon.contains("Encrypted realtime transport is unavailable"),
-        "the daemon must reject encryption instead of silently enabling a transport that drops frames"
+        !daemon.contains("Encrypted realtime transport is unavailable"),
+        "the daemon must not reject encryption now that the realtime AEAD path is allocation-free"
+    );
+    assert!(
+        daemon.contains("no session cipher"),
+        "builds without a session cipher must still refuse to enable encryption"
     );
 }
 
@@ -806,12 +821,12 @@ fn swift_shared_memory_drops_old_capture_when_ring_is_full() {
 }
 
 #[test]
-fn swift_hal_encryption_tests_cover_crypto_and_realtime_rejection() {
+fn swift_hal_encryption_tests_cover_crypto_and_realtime_roundtrip() {
     // Moved from sotf-daw's driver-hal hal_passthrough_tests: the Swift
     // source lives in this workspace, so the contract check lives here too.
     let swift_tests = include_str!("../../../swift/driver-hal/Sources/Tests.swift");
     assert!(swift_tests.contains("testEncryptionRoundTrip"));
-    assert!(swift_tests.contains("testSharedMemoryEncryptedRealtimeIsRejected"));
+    assert!(swift_tests.contains("testSharedMemoryEncryptedRealtimeRoundTrips"));
     assert!(swift_tests.contains("SharedAudioBuffer()"));
     assert!(swift_tests.contains("writeAudio("));
     assert!(swift_tests.contains("readAudio("));

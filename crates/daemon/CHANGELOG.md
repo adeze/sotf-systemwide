@@ -1,5 +1,69 @@
 # 0.1.38 (unreleased)
 
+## Encrypted realtime transport can be enabled
+
+- `set_encryption` with `enabled: true` is honored again on macOS HAL builds:
+  the HAL realtime path uses the allocation-free caller-buffer AEAD core, so
+  the stale "Encrypted realtime transport is unavailable" rejection is gone.
+  Builds without a session cipher still refuse with an explicit error.
+- The `SOTF_ENABLE_ALLOCATING_REALTIME_ENCRYPTION` compile guards are removed
+  from the HAL shared-memory read/write paths; encrypted frames roundtrip
+  through the ring instead of being dropped.
+
+## Plugin picker serves every user-insertable type with canonical categories
+
+- `get_available_plugins` now also serves `ab_compare`, `band_split`, and
+  `band_merge`, matching the player pickers; the ConfigBar add menus offer
+  43 types instead of 40.
+- Plugin categories follow the canonical player grouping (Dynamics, EQ &
+  Tone, Denoising, Spatial, Analysis, Routing), replacing the daemon's
+  divergent names. ConfigBar's graph-editor menus group by category.
+- `loudness_monitor` stays hidden: it is daemon-owned metering, injected at
+  both chain boundaries, and user instances are stripped from racks and
+  rejected from graphs. `spectrum_analyzer` stays hidden: it is a
+  daemon-owned system type with no daemon data path exposing its readings.
+
+## Missing output devices fall back to the default output
+
+- Engine starts whose desired output device is not enumerated now degrade to
+  the default-safe output (system default when it is a safe physical device,
+  otherwise the first safe enumerated device) instead of failing. The desired
+  device is preserved, so status shows the divergence and a replugged device
+  can be re-selected; the fallback is never persisted over it.
+- The fallback plays its own stored DSP chain: cold start recalls the profile
+  for the device playback will actually open, so a missing interface's
+  correction is never applied to another output.
+- Snapshots report an active fallback as an `output_device_fallback` warning
+  fault (health `warning`, audio flowing) while streaming; idle divergence
+  stays silent. Explicit route changes still validate the device upfront and
+  error on missing devices.
+- Virtual/loopback devices can never be selected as the fallback: processed
+  audio is never routed back into the capture device.
+- Installer component order is HAL first, so the driver payload lands and
+  CoreAudio restarts before the daemon starts and the smoke test validates
+  the final system state.
+
+## Offline output devices no longer hang or fail installs
+
+- Name the missing output device when pipeline start fails while the desired
+  device is not enumerated. The engine only reports "Engine thread exited
+  unexpectedly" once its manager thread is gone, which bypassed the cold-start
+  retry matcher and latched an unactionable fault; the clarified error keeps
+  the engine's original message, lists the available outputs, and retries
+  while the absence still looks like a late-enumeration race.
+- Suggest `select_output_device` in status `recovery_actions` when a latched
+  device-availability fault leaves nothing playing, so ConfigBar and the
+  installer steer at the powered-off/unplugged device instead of a bare
+  daemon restart.
+- Clear a stale pipeline-recovery latch when cold start commits to another
+  retry attempt, so a terminal latch is never observed mid-retry.
+- Installer postinstall smoke test (`scripts/lib/daemon_smoke.py`) streams
+  per-poll progress to the install log, fails fast on confirmed terminal
+  faults, and lets the install proceed with a loud warning when the daemon
+  is healthy but the desired output device is offline.
+- Bound every osascript call made under Installer with a timeout so a wedged
+  app or headless session fails visibly instead of hanging the install.
+
 ## Shared-memory resurrection diagnostics
 
 - Detect when the live Rust or Swift mmap no longer matches the published

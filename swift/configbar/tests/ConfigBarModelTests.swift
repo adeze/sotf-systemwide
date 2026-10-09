@@ -87,30 +87,33 @@ final class ConfigBarModelTests: XCTestCase {
 
     func testGroupPluginsByCategoryPreservesOrderAndSortsUnknownAlphabetically() {
         let plugins = [
-            availablePlugin(type: "delay", category: "Effects"),
+            availablePlugin(type: "ab_compare", category: "Analysis"),
+            availablePlugin(type: "delay", category: "EQ & Tone"),
             availablePlugin(type: "eq", category: "EQ & Tone"),
-            availablePlugin(type: "upmixer", category: "Spatial & Routing"),
+            availablePlugin(type: "upmixer", category: "Spatial"),
             availablePlugin(type: "zebra", category: "Zebra"),
             availablePlugin(type: "compressor", category: "Dynamics"),
             availablePlugin(type: "alpha", category: "Alpha"),
-            availablePlugin(type: "denoiser", category: "Restoration"),
+            availablePlugin(type: "denoiser", category: "Denoising"),
+            availablePlugin(type: "band_split", category: "Routing"),
         ]
 
         let grouped = groupPluginsByCategory(plugins)
         let names = grouped.map { $0.name }
 
         XCTAssertEqual(names, [
-            "EQ & Tone",
             "Dynamics",
-            "Spatial & Routing",
-            "Effects",
-            "Restoration",
+            "EQ & Tone",
+            "Denoising",
+            "Spatial",
+            "Analysis",
+            "Routing",
             "Alpha",
             "Zebra",
         ])
 
-        XCTAssertEqual(grouped.first { $0.name == "EQ & Tone" }?.plugins.map(\.type_), ["eq"])
-        XCTAssertEqual(grouped.first { $0.name == "Effects" }?.plugins.map(\.type_), ["delay"])
+        XCTAssertEqual(grouped.first { $0.name == "EQ & Tone" }?.plugins.map(\.type_), ["delay", "eq"])
+        XCTAssertEqual(grouped.first { $0.name == "Analysis" }?.plugins.map(\.type_), ["ab_compare"])
         XCTAssertEqual(grouped.first { $0.name == "Alpha" }?.plugins.map(\.type_), ["alpha"])
         XCTAssertEqual(grouped.first { $0.name == "Zebra" }?.plugins.map(\.type_), ["zebra"])
     }
@@ -128,6 +131,16 @@ final class ConfigBarModelTests: XCTestCase {
         XCTAssertEqual(pluginDisplayName("multiband_compressor"), "Multiband Compressor")
         XCTAssertEqual(pluginDisplayName("loudness_compensation"), "Loudness Compensation")
         XCTAssertEqual(pluginDisplayName("ab_compare"), "A/B Compare")
+        XCTAssertEqual(pluginDisplayName("dither"), "Dither")
+        XCTAssertEqual(pluginDisplayName("analog_eq"), "Analog EQ")
+        XCTAssertEqual(pluginDisplayName("analog_compressor"), "Analog Compressor")
+        XCTAssertEqual(pluginDisplayName("analog_limiter"), "Analog Limiter")
+        XCTAssertEqual(pluginDisplayName("crossfeed"), "Crossfeed")
+        XCTAssertEqual(pluginDisplayName("crossover"), "Crossover")
+        XCTAssertEqual(pluginDisplayName("loudness_monitor"), "Loudness Monitor")
+        XCTAssertEqual(pluginDisplayName("spectrum_analyzer"), "Spectrum Analyzer")
+        XCTAssertEqual(pluginDisplayName("band_split"), "Band Split")
+        XCTAssertEqual(pluginDisplayName("band_merge"), "Band Merge")
     }
 
     func testPluginDisplayNameUnknownTypeReturnsInput() {
@@ -614,6 +627,120 @@ final class ConfigBarModelTests: XCTestCase {
             ConfigBarEQParameters.channelFilters([:], channelCount: 2).count,
             2
         )
+    }
+
+    // MARK: - Matrix editor parameter policy
+
+    func testMatrixGainsNormalizeToChannelCounts() {
+        let params: [String: Any] = [
+            "input_channels": 2,
+            "output_channels": 2,
+            "matrix": [1.0, 0.0, 0.0],
+        ]
+
+        let gains = ConfigBarMatrixParameters.gains(params, inputChannels: 2, outputChannels: 2)
+        XCTAssertEqual(gains, [1.0, 0.0, 0.0, 1.0])
+
+        let empty = ConfigBarMatrixParameters.gains([:], inputChannels: 2, outputChannels: 2)
+        XCTAssertEqual(empty, [1.0, 0.0, 0.0, 1.0])
+    }
+
+    func testMatrixChannelStatesResizeToOutputCount() {
+        let params: [String: Any] = [
+            "channel_states": [["muted": true, "soloed": false, "dimmed": false]],
+        ]
+
+        let states = ConfigBarMatrixParameters.channelStates(params, outputChannels: 2)
+        XCTAssertEqual(states.count, 2)
+        XCTAssertTrue(states[0].muted)
+        XCTAssertEqual(states[1], MatrixChannelState())
+
+        let roundTripped = ConfigBarMatrixParameters.applyingMatrix(
+            ["gain": 1.0],
+            inputChannels: 2,
+            outputChannels: 2,
+            gains: [1.0, 0.0, 0.0, 1.0],
+            channelStates: states
+        )
+        XCTAssertEqual(roundTripped["gain"] as? Double, 1.0)
+        XCTAssertEqual(roundTripped["input_channels"] as? Int, 2)
+        XCTAssertEqual(roundTripped["matrix"] as? [Double], [1.0, 0.0, 0.0, 1.0])
+        let wireStates = roundTripped["channel_states"] as? [[String: Any]]
+        XCTAssertEqual(wireStates?.count, 2)
+        XCTAssertEqual(wireStates?.first?["muted"] as? Bool, true)
+    }
+
+    func testMatrixPresetsApplyAndDetect() {
+        let identity = ConfigBarMatrixParameters.applyPreset("Identity", inputChannels: 2, outputChannels: 2)
+        XCTAssertEqual(identity, [1.0, 0.0, 0.0, 1.0])
+
+        let swap = ConfigBarMatrixParameters.applyPreset("Swap L/R", inputChannels: 2, outputChannels: 2)
+        XCTAssertEqual(swap, [0.0, 1.0, 1.0, 0.0])
+
+        let mono = ConfigBarMatrixParameters.applyPreset("Mono Mix", inputChannels: 2, outputChannels: 2)
+        XCTAssertEqual(mono, [0.5, 0.5, 0.5, 0.5])
+
+        let encode = ConfigBarMatrixParameters.applyPreset("M/S Encode", inputChannels: 2, outputChannels: 2)
+        XCTAssertEqual(encode, [0.5, 0.5, 0.5, -0.5])
+
+        let decode = ConfigBarMatrixParameters.applyPreset("M/S Decode", inputChannels: 2, outputChannels: 2)
+        XCTAssertEqual(decode, [1.0, 1.0, 1.0, -1.0])
+
+        for (preset, gains) in [
+            ("Identity", identity),
+            ("Swap L/R", swap),
+            ("Mono Mix", mono),
+            ("M/S Encode", encode),
+            ("M/S Decode", decode),
+        ] {
+            XCTAssertEqual(
+                ConfigBarMatrixParameters.detectPreset(inputChannels: 2, outputChannels: 2, gains: gains),
+                preset
+            )
+        }
+        XCTAssertEqual(
+            ConfigBarMatrixParameters.detectPreset(inputChannels: 2, outputChannels: 2, gains: [1.0, 0.5, 0.0, 1.0]),
+            "Custom"
+        )
+        XCTAssertEqual(
+            ConfigBarMatrixParameters.availablePresets(inputChannels: 1, outputChannels: 1),
+            ["Identity"]
+        )
+        XCTAssertEqual(
+            ConfigBarMatrixParameters.availablePresets(inputChannels: 2, outputChannels: 2).count,
+            5
+        )
+    }
+
+    func testMatrixGainDbFormatting() {
+        XCTAssertEqual(ConfigBarMatrixParameters.formatGainDb(0.0), "-∞")
+        XCTAssertEqual(ConfigBarMatrixParameters.formatGainDb(0.0005), "-∞")
+        XCTAssertEqual(ConfigBarMatrixParameters.formatGainDb(1.0), "0")
+        XCTAssertEqual(ConfigBarMatrixParameters.formatGainDb(-1.0), "-0")
+        XCTAssertEqual(ConfigBarMatrixParameters.formatGainDb(0.5), "-6.0")
+        XCTAssertEqual(ConfigBarMatrixParameters.formatGainDb(-0.5), "--6.0")
+        XCTAssertEqual(ConfigBarMatrixParameters.formatGainDb(2.0), "6.0")
+        XCTAssertEqual(ConfigBarMatrixParameters.dbToLinear(-6.0), 0.5011872336272722, accuracy: 1e-9)
+        XCTAssertEqual(ConfigBarMatrixParameters.linearToDb(0.0), ConfigBarMatrixParameters.minDb)
+    }
+
+    func testMatrixChannelLabelsAndGroups() {
+        XCTAssertEqual(ConfigBarMatrixParameters.channelLabel(index: 0, total: 2), "L")
+        XCTAssertEqual(ConfigBarMatrixParameters.channelLabel(index: 1, total: 2), "R")
+        XCTAssertEqual(ConfigBarMatrixParameters.channelLabel(index: 3, total: 6), "LFE")
+        XCTAssertEqual(ConfigBarMatrixParameters.channelLabel(index: 4, total: 7), "Ch4")
+
+        let stereo = ConfigBarMatrixParameters.outputGroups(total: 2)
+        XCTAssertEqual(stereo.count, 1)
+        XCTAssertEqual(stereo.first?.name, "L/R")
+        XCTAssertEqual(stereo.first?.channels, [0, 1])
+
+        let surround = ConfigBarMatrixParameters.outputGroups(total: 6)
+        XCTAssertEqual(surround.map { $0.name }, ["L/R", "Center", "LFE", "Surrounds"])
+
+        let unknown = ConfigBarMatrixParameters.outputGroups(total: 7)
+        XCTAssertEqual(unknown.count, 7)
+        XCTAssertEqual(unknown.first?.channels, [0])
     }
 
     // MARK: - Output profile key policy

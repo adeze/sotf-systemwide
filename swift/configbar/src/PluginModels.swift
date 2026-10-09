@@ -454,7 +454,8 @@ public func groupPluginsByCategory(_ plugins: [AvailablePlugin]) -> [PluginCateg
         categoryMap[plugin.category, default: []].append(plugin)
     }
 
-    let order = ["EQ & Tone", "Dynamics", "Spatial & Routing", "Effects", "Restoration", "Utility"]
+    // Canonical player order (`sotf_audio_player::plugin_categories::CATEGORIES`).
+    let order = ["Dynamics", "EQ & Tone", "Denoising", "Spatial", "Analysis", "Routing"]
     var result: [PluginCategory] = []
     for name in order {
         if let plugins = categoryMap.removeValue(forKey: name) {
@@ -507,6 +508,16 @@ public func pluginDisplayName(_ type: String) -> String {
     case "beamformer": return "Beamformer"
     case "ambisonics_decoder": return "Ambisonics Decoder"
     case "ab_compare": return "A/B Compare"
+    case "dither": return "Dither"
+    case "analog_compressor": return "Analog Compressor"
+    case "analog_eq": return "Analog EQ"
+    case "analog_limiter": return "Analog Limiter"
+    case "crossfeed": return "Crossfeed"
+    case "crossover": return "Crossover"
+    case "loudness_monitor": return "Loudness Monitor"
+    case "spectrum_analyzer": return "Spectrum Analyzer"
+    case "band_split": return "Band Split"
+    case "band_merge": return "Band Merge"
     default: return type
     }
 }

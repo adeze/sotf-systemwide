@@ -487,3 +487,383 @@ public enum ConfigBarEQParameters {
         return next
     }
 }
+
+/// Mute/solo/dim state for one matrix output channel. Wire form is
+/// `{"muted": Bool, "soloed": Bool, "dimmed": Bool}`.
+public struct MatrixChannelState: Equatable {
+    public var muted: Bool
+    public var soloed: Bool
+    public var dimmed: Bool
+
+    public init(muted: Bool = false, soloed: Bool = false, dimmed: Bool = false) {
+        self.muted = muted
+        self.soloed = soloed
+        self.dimmed = dimmed
+    }
+
+    public static func parse(_ raw: Any?) -> MatrixChannelState {
+        guard let dict = raw as? [String: Any] else { return MatrixChannelState() }
+        return MatrixChannelState(
+            muted: boolValue(dict["muted"]),
+            soloed: boolValue(dict["soloed"]),
+            dimmed: boolValue(dict["dimmed"])
+        )
+    }
+
+    public var wire: [String: Any] {
+        ["muted": muted, "soloed": soloed, "dimmed": dimmed]
+    }
+
+    private static func boolValue(_ raw: Any?) -> Bool {
+        if let bool = raw as? Bool { return bool }
+        if let number = raw as? NSNumber { return number.boolValue }
+        return false
+    }
+}
+
+/// Pure matrix-mixer policy, mirroring the engine (`sotf-engine
+/// plugins/matrix.rs`) and the app-gpui matrix picker so every frontend
+/// computes the same presets, labels, and dB text. Gains are row-major
+/// linear coefficients: `gains[out * inCount + in]`. Keeping the mapping
+/// here makes the parameter contract unit-testable without hosting a
+/// SwiftUI view.
+public enum ConfigBarMatrixParameters {
+    public static let matrixKey = "matrix"
+    public static let inputChannelsKey = "input_channels"
+    public static let outputChannelsKey = "output_channels"
+    public static let channelStatesKey = "channel_states"
+    public static let minDb = -60.0
+    public static let maxDb = 6.0
+    public static let silenceThreshold = 0.001
+    public static let presetTolerance = 0.001
+    /// The grid renders at most this many rows/columns; wider matrices keep
+    /// their full data and remain editable through the route pickers.
+    public static let maxRenderChannels = 32
+
+    public static func intValue(_ raw: Any?) -> Int? {
+        if let int = raw as? Int { return int }
+        if let double = raw as? Double, double.isFinite { return Int(double) }
+        if let number = raw as? NSNumber { return number.intValue }
+        if let string = raw as? String { return Int(string) }
+        return nil
+    }
+
+    public static func inputChannels(_ parameters: [String: Any], fallback: Int) -> Int {
+        max(intValue(parameters[inputChannelsKey]) ?? fallback, 1)
+    }
+
+    public static func outputChannels(_ parameters: [String: Any], fallback: Int) -> Int {
+        max(intValue(parameters[outputChannelsKey]) ?? fallback, 1)
+    }
+
+    public static func cellIndex(input: Int, output: Int, inputCount: Int) -> Int {
+        output * inputCount + input
+    }
+
+    /// Gains normalized to exactly `inputChannels * outputChannels` entries.
+    /// Stored values are kept as a flat prefix; diagonal cells without a
+    /// stored value read as unity (mirroring the engine's resize fill) so a
+    /// truncated list still renders a usable grid.
+    public static func gains(
+        _ parameters: [String: Any],
+        inputChannels: Int,
+        outputChannels: Int
+    ) -> [Double] {
+        let stored = (parameters[matrixKey] as? [Any] ?? []).map {
+            ConfigBarDelayParameters.doubleValue($0) ?? 0.0
+        }
+        return normalizedGains(stored, inputChannels: inputChannels, outputChannels: outputChannels)
+    }
+
+    public static func normalizedGains(
+        _ stored: [Double],
+        inputChannels: Int,
+        outputChannels: Int
+    ) -> [Double] {
+        let count = inputChannels * outputChannels
+        guard stored.count != count else { return stored.map { $0.isFinite ? $0 : 0.0 } }
+        var next = [Double](repeating: 0.0, count: count)
+        for index in 0..<min(stored.count, count) {
+            next[index] = stored[index].isFinite ? stored[index] : 0.0
+        }
+        for channel in 0..<min(inputChannels, outputChannels) {
+            let index = cellIndex(input: channel, output: channel, inputCount: inputChannels)
+            if index >= stored.count {
+                next[index] = 1.0
+            }
+        }
+        return next
+    }
+
+    /// Output channel states sized to `outputChannels`; missing entries
+    /// default to unmuted/unsoloed/undimmed.
+    public static func channelStates(
+        _ parameters: [String: Any],
+        outputChannels: Int
+    ) -> [MatrixChannelState] {
+        let stored = (parameters[channelStatesKey] as? [Any] ?? []).map {
+            MatrixChannelState.parse($0)
+        }
+        if stored.count >= outputChannels {
+            return Array(stored.prefix(outputChannels))
+        }
+        return stored + Array(
+            repeating: MatrixChannelState(),
+            count: outputChannels - stored.count
+        )
+    }
+
+    /// Full matrix update. Unknown keys (e.g. the master `gain`) round-trip
+    /// untouched; only the routing keys are replaced.
+    public static func applyingMatrix(
+        _ parameters: [String: Any],
+        inputChannels: Int,
+        outputChannels: Int,
+        gains: [Double],
+        channelStates: [MatrixChannelState]
+    ) -> [String: Any] {
+        var next = parameters
+        next[inputChannelsKey] = max(inputChannels, 1)
+        next[outputChannelsKey] = max(outputChannels, 1)
+        next[matrixKey] = normalizedGains(
+            gains,
+            inputChannels: max(inputChannels, 1),
+            outputChannels: max(outputChannels, 1)
+        )
+        next[channelStatesKey] = channelStates.prefix(max(outputChannels, 1)).map(\.wire)
+        return next
+    }
+
+    public static func availablePresets(inputChannels: Int, outputChannels: Int) -> [String] {
+        var presets = ["Identity"]
+        if inputChannels >= 2 && outputChannels >= 2 {
+            presets.append("Swap L/R")
+        }
+        if inputChannels > 1 {
+            presets.append("Mono Mix")
+        }
+        if inputChannels >= 2 && outputChannels >= 2 {
+            presets.append("M/S Encode")
+            presets.append("M/S Decode")
+        }
+        return presets
+    }
+
+    public static func detectPreset(
+        inputChannels: Int,
+        outputChannels: Int,
+        gains: [Double]
+    ) -> String {
+        if isIdentityMatrix(inputChannels: inputChannels, outputChannels: outputChannels, gains: gains) {
+            return "Identity"
+        } else if isSwapMatrix(inputChannels: inputChannels, outputChannels: outputChannels, gains: gains) {
+            return "Swap L/R"
+        } else if isMonoMixMatrix(inputChannels: inputChannels, outputChannels: outputChannels, gains: gains) {
+            return "Mono Mix"
+        } else if isMsEncodeMatrix(inputChannels: inputChannels, outputChannels: outputChannels, gains: gains) {
+            return "M/S Encode"
+        } else if isMsDecodeMatrix(inputChannels: inputChannels, outputChannels: outputChannels, gains: gains) {
+            return "M/S Decode"
+        } else {
+            return "Custom"
+        }
+    }
+
+    /// Fresh gain list for `preset`, sized to the channel counts. Unknown
+    /// names (including "Custom") fall back to identity, like the engine.
+    public static func applyPreset(
+        _ preset: String,
+        inputChannels: Int,
+        outputChannels: Int
+    ) -> [Double] {
+        var next = [Double](repeating: 0.0, count: inputChannels * outputChannels)
+        guard inputChannels > 0, outputChannels > 0 else { return next }
+        switch preset {
+        case "Identity":
+            for channel in 0..<min(inputChannels, outputChannels) {
+                next[cellIndex(input: channel, output: channel, inputCount: inputChannels)] = 1.0
+            }
+        case "Swap L/R":
+            if inputChannels >= 2 && outputChannels >= 2 {
+                next[cellIndex(input: 1, output: 0, inputCount: inputChannels)] = 1.0
+                next[cellIndex(input: 0, output: 1, inputCount: inputChannels)] = 1.0
+                for channel in 2..<min(inputChannels, outputChannels) {
+                    next[cellIndex(input: channel, output: channel, inputCount: inputChannels)] = 1.0
+                }
+            }
+        case "Mono Mix":
+            let gain = 1.0 / Double(inputChannels)
+            next = [Double](repeating: gain, count: inputChannels * outputChannels)
+        case "M/S Encode":
+            if inputChannels >= 2 && outputChannels >= 2 {
+                next[cellIndex(input: 0, output: 0, inputCount: inputChannels)] = 0.5
+                next[cellIndex(input: 1, output: 0, inputCount: inputChannels)] = 0.5
+                next[cellIndex(input: 0, output: 1, inputCount: inputChannels)] = 0.5
+                next[cellIndex(input: 1, output: 1, inputCount: inputChannels)] = -0.5
+                for channel in 2..<min(inputChannels, outputChannels) {
+                    next[cellIndex(input: channel, output: channel, inputCount: inputChannels)] = 1.0
+                }
+            }
+        case "M/S Decode":
+            if inputChannels >= 2 && outputChannels >= 2 {
+                next[cellIndex(input: 0, output: 0, inputCount: inputChannels)] = 1.0
+                next[cellIndex(input: 1, output: 0, inputCount: inputChannels)] = 1.0
+                next[cellIndex(input: 0, output: 1, inputCount: inputChannels)] = 1.0
+                next[cellIndex(input: 1, output: 1, inputCount: inputChannels)] = -1.0
+                for channel in 2..<min(inputChannels, outputChannels) {
+                    next[cellIndex(input: channel, output: channel, inputCount: inputChannels)] = 1.0
+                }
+            }
+        default:
+            for channel in 0..<min(inputChannels, outputChannels) {
+                next[cellIndex(input: channel, output: channel, inputCount: inputChannels)] = 1.0
+            }
+        }
+        return next
+    }
+
+    private static func isIdentityMatrix(inputChannels: Int, outputChannels: Int, gains: [Double]) -> Bool {
+        guard gains.count == inputChannels * outputChannels else { return false }
+        for output in 0..<outputChannels {
+            for input in 0..<inputChannels {
+                let expected = (input == output) ? 1.0 : 0.0
+                if abs(gains[cellIndex(input: input, output: output, inputCount: inputChannels)] - expected) > presetTolerance {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    private static func isSwapMatrix(inputChannels: Int, outputChannels: Int, gains: [Double]) -> Bool {
+        guard inputChannels >= 2, outputChannels >= 2,
+              gains.count == inputChannels * outputChannels else { return false }
+        for output in 0..<outputChannels {
+            for input in 0..<inputChannels {
+                let swapped = (output == 0 && input == 1) || (output == 1 && input == 0)
+                    || (output >= 2 && input == output)
+                let expected = swapped ? 1.0 : 0.0
+                if abs(gains[cellIndex(input: input, output: output, inputCount: inputChannels)] - expected) > presetTolerance {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    private static func isMonoMixMatrix(inputChannels: Int, outputChannels: Int, gains: [Double]) -> Bool {
+        guard gains.count == inputChannels * outputChannels, inputChannels > 0 else { return false }
+        let expected = 1.0 / Double(inputChannels)
+        return gains.allSatisfy { abs($0 - expected) <= presetTolerance }
+    }
+
+    private static func isMsEncodeMatrix(inputChannels: Int, outputChannels: Int, gains: [Double]) -> Bool {
+        guard inputChannels >= 2, outputChannels >= 2,
+              gains.count == inputChannels * outputChannels else { return false }
+        for output in 0..<outputChannels {
+            for input in 0..<inputChannels {
+                let expected: Double
+                switch (output, input) {
+                case (0, 0), (0, 1), (1, 0): expected = 0.5
+                case (1, 1): expected = -0.5
+                default: expected = (output >= 2 && input == output) ? 1.0 : 0.0
+                }
+                if abs(gains[cellIndex(input: input, output: output, inputCount: inputChannels)] - expected) > presetTolerance {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    private static func isMsDecodeMatrix(inputChannels: Int, outputChannels: Int, gains: [Double]) -> Bool {
+        guard inputChannels >= 2, outputChannels >= 2,
+              gains.count == inputChannels * outputChannels else { return false }
+        for output in 0..<outputChannels {
+            for input in 0..<inputChannels {
+                let expected: Double
+                switch (output, input) {
+                case (0, 0), (0, 1), (1, 0): expected = 1.0
+                case (1, 1): expected = -1.0
+                default: expected = (output >= 2 && input == output) ? 1.0 : 0.0
+                }
+                if abs(gains[cellIndex(input: input, output: output, inputCount: inputChannels)] - expected) > presetTolerance {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    /// dB text for a cell, mirroring the app-gpui matrix grid: silence reads
+    /// "-∞", unity reads "0", and negative (phase-inverted) gains keep a
+    /// minus prefix.
+    public static func formatGainDb(_ linear: Double) -> String {
+        guard linear.isFinite else { return "-∞" }
+        if abs(linear) < silenceThreshold {
+            return "-∞"
+        }
+        let sign = linear < 0 ? "-" : ""
+        let db = 20.0 * log10(abs(linear))
+        if abs(db) < 0.05 {
+            return "\(sign)0"
+        }
+        return String(format: "\(sign)%.1f", db)
+    }
+
+    public static func dbToLinear(_ db: Double) -> Double {
+        guard db.isFinite else { return 0.0 }
+        return pow(10.0, db / 20.0)
+    }
+
+    /// dB value for the route gain control: silence floors at `minDb`, and
+    /// the magnitude ignores polarity (the polarity switch owns the sign).
+    public static func linearToDb(_ linear: Double) -> Double {
+        guard linear.isFinite, abs(linear) >= silenceThreshold else { return minDb }
+        return 20.0 * log10(abs(linear))
+    }
+
+    /// Speaker label for a channel index, mirroring the engine's
+    /// channel-count lookup; unknown layouts fall back to "Ch{index}".
+    public static func channelLabel(index: Int, total: Int) -> String {
+        if let labels = channelLabelsByCount[total], labels.indices.contains(index) {
+            return labels[index]
+        }
+        return "Ch\(index)"
+    }
+
+    /// Output groups for the mute/solo/dim sidebar, mirroring the engine's
+    /// meter groups; unknown layouts group each channel alone.
+    public static func outputGroups(total: Int) -> [(name: String, channels: [Int])] {
+        if let groups = outputGroupsByCount[total] {
+            return groups
+        }
+        return (0..<max(total, 1)).map { ("Ch\($0)", [$0]) }
+    }
+
+    private static let channelLabelsByCount: [Int: [String]] = [
+        1: ["M"],
+        2: ["L", "R"],
+        3: ["L", "R", "LFE"],
+        5: ["L", "R", "C", "SL", "SR"],
+        6: ["L", "R", "C", "LFE", "SL", "SR"],
+        8: ["L", "R", "C", "LFE", "SL", "SR", "BL", "BR"],
+        10: ["L", "R", "C", "LFE", "SL", "SR", "TFL", "TFR", "TBL", "TBR"],
+        12: ["L", "R", "C", "LFE", "SL", "SR", "BL", "BR", "TFL", "TFR", "TBL", "TBR"],
+        14: ["L", "R", "WL", "WR", "C", "LFE", "SL", "SR", "BL", "BR", "TFL", "TFR", "TBL", "TBR"],
+        16: ["L", "R", "WL", "WR", "C", "LFE", "SL", "SR", "BL", "BR", "TFL", "TFR", "TML", "TMR", "TBL", "TBR"],
+    ]
+
+    private static let outputGroupsByCount: [Int: [(name: String, channels: [Int])]] = [
+        1: [("Mono", [0])],
+        2: [("L/R", [0, 1])],
+        3: [("L/R", [0, 1]), ("LFE", [2])],
+        5: [("L/R", [0, 1]), ("Center", [2]), ("Surrounds", [3, 4])],
+        6: [("L/R", [0, 1]), ("Center", [2]), ("LFE", [3]), ("Surrounds", [4, 5])],
+        8: [("L/R", [0, 1]), ("Center", [2]), ("LFE", [3]), ("Side", [4, 5]), ("Rear", [6, 7])],
+        10: [("L/R", [0, 1]), ("Center", [2]), ("LFE", [3]), ("Surrounds", [4, 5]), ("Height", [6, 7, 8, 9])],
+        12: [("L/R", [0, 1]), ("Center", [2]), ("LFE", [3]), ("Side", [4, 5]), ("Rear", [6, 7]), ("Height", [8, 9, 10, 11])],
+        14: [("Front", [0, 1, 2, 3]), ("Center", [4]), ("LFE", [5]), ("Side", [6, 7]), ("Rear", [8, 9]), ("Height", [10, 11, 12, 13])],
+        16: [("Front", [0, 1, 2, 3]), ("Center", [4]), ("LFE", [5]), ("Side", [6, 7]), ("Rear", [8, 9]), ("Top Front", [10, 11]), ("Top Mid", [12, 13]), ("Top Rear", [14, 15])],
+    ]
+}

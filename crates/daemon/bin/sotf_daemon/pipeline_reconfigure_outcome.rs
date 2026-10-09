@@ -294,6 +294,29 @@ fn reconfigure_audio_pipeline_with_sink(
         return Ok(PipelineReconfigureOutcome::IdleUpdated);
     }
 
+    // Same stale-device degradation as the load path, resolved after the
+    // idle early return so an idle commit still records the desired device
+    // verbatim. The restore plan resolves too: the applied device may itself
+    // have vanished mid-session.
+    let effective =
+        super::misc::resolve_effective_output_device(plan.spec.output_device.as_deref());
+    if let Some(fallback) = &effective.fallback {
+        log::warn!(
+            "Desired output device '{}' is not available; falling back to default output '{}'",
+            fallback.desired,
+            fallback.applied
+        );
+    }
+    let fallback = effective.fallback;
+    let mut plan = plan;
+    plan.spec.output_device = effective.device;
+    let mut previous_plan = previous_plan;
+    if let Some(previous) = previous_plan.as_mut() {
+        let effective =
+            super::misc::resolve_effective_output_device(previous.spec.output_device.as_deref());
+        previous.spec.output_device = effective.device;
+    }
+
     log::info!("Reconfiguring driver playback pipeline");
 
     if let Err(e) = manager.stop() {
@@ -317,11 +340,23 @@ fn reconfigure_audio_pipeline_with_sink(
 
     match result {
         Ok(_) => {
-            system_state.lock().commit_applied(&plan);
+            match &fallback {
+                Some(fallback) => system_state
+                    .lock()
+                    .commit_fallback_applied(&plan, Some(fallback.desired.clone())),
+                None => system_state.lock().commit_applied(&plan),
+            }
             log::info!("Driver playback restarted successfully");
             Ok(PipelineReconfigureOutcome::Restarted)
         }
-        Err(e) => {
+        Err(error) => {
+            // Same device-absence aliasing as the load path: the engine's
+            // generic exit message would otherwise latch an unactionable
+            // fault when the desired output disappears mid-session.
+            let e = super::misc::clarify_device_absence_error(
+                plan.spec.output_device.as_deref(),
+                &error,
+            );
             log::error!("Failed to restart driver playback: {}", e);
 
             let Some(previous_plan) = previous_plan else {
