@@ -1826,6 +1826,29 @@ mod ipc_safety_tests {
     }
 
     #[test]
+    fn testkit_load_plugin_artifact_path_rejects_non_absolute_paths() {
+        // The artifact-path command reads a file on the daemon's behalf, so it
+        // must enforce the same local-regular-file policy as `load`: a
+        // relative path resolves against the daemon working directory and must
+        // never be opened.
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(state);
+
+        let response = send_owner_ipc_command(
+            &daemon,
+            r#"{"command":"load_plugin_artifact_path","path":"relative/room-eq.json"}"#,
+        );
+
+        assert_eq!(response["success"], false);
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("must be absolute"))
+        );
+        assert!(daemon.system_state.lock().user_plugins().is_empty());
+    }
+
+    #[test]
     fn testkit_load_plugin_artifact_graph_plan_preserves_topology() {
         // Applying a graph starts the real cpal output thread, which is not
         // available on headless CI hosts. Exercise the same artifact parser

@@ -178,6 +178,7 @@ final class HALDriverTests {
                 attributes: [.posixPermissions: 0o700]
             )
             fileManager.createFile(atPath: shmPath, contents: Data(count: totalSize))
+            chmod(shmPath, 0o600)
         } catch {
             halLog("    FAIL: fixture setup failed: (error)")
             return false
@@ -302,6 +303,7 @@ final class HALDriverTests {
                 attributes: [.posixPermissions: 0o700]
             )
             fileManager.createFile(atPath: shmPath, contents: Data(count: totalSize))
+            chmod(shmPath, 0o600)
         } catch {
             halLog("    FAIL: fixture setup failed: \(error)")
             return false
@@ -554,6 +556,7 @@ final class HALDriverTests {
                 attributes: [.posixPermissions: 0o700]
             )
             fileManager.createFile(atPath: shmPath, contents: Data(count: totalSize))
+            chmod(shmPath, 0o600)
         } catch {
             halLog("    FAIL: fixture setup failed: \(error)")
             return false
@@ -662,6 +665,7 @@ final class HALDriverTests {
             ) else {
                 return false
             }
+            chmod(shmPath, 0o600)
             let replacementFD = Darwin.open(shmPath, O_RDWR)
             guard replacementFD >= 0 else { return false }
             defer { Darwin.close(replacementFD) }
@@ -1253,6 +1257,7 @@ final class HALDriverTests {
                 attributes: [.posixPermissions: 0o700]
             )
             fileManager.createFile(atPath: shmPath, contents: Data(count: totalSize))
+            chmod(shmPath, 0o600)
             try Data(keyBytes).write(to: URL(fileURLWithPath: keyPath))
             chmod(keyPath, 0o600)
         } catch {

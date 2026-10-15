@@ -33,6 +33,9 @@ cpal = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+rand = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 driver-hal = { workspace = true, optional = true }
 objc2-core-audio = { workspace = true, features = ["std", "objc2-core-audio-types", "AudioHardware"], default-features = false }
@@ -43,3 +46,4 @@ serial_test = { workspace = true }
 tempfile = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
+rand = { workspace = true }

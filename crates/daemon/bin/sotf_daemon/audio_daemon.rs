@@ -2106,6 +2106,13 @@ impl SystemwideController {
             }
         }
 
+        // The artifact path command reads a file on the daemon's behalf, so it
+        // enforces the same local-regular-file policy as the `load` command:
+        // absolute, same-owner, non-symlink regular files only.
+        let canonical_path = match validate_user_load_path(std::path::Path::new(path)) {
+            Ok(canonical_path) => canonical_path,
+            Err(error) => return Response::err(format!("Invalid plugin artifact: {error}")),
+        };
         let driver_status = self.driver_manager.lock().status();
         let sample_rate = if driver_status.sample_rate > 0 {
             driver_status.sample_rate
@@ -2113,7 +2120,7 @@ impl SystemwideController {
             48_000
         };
         let file_plan = match crate::plugin_artifact::plan_plugin_artifact_file(
-            std::path::Path::new(path),
+            &canonical_path,
             f64::from(sample_rate),
         ) {
             Ok(plan) => plan,
@@ -3575,7 +3582,7 @@ impl SystemwideController {
             )
         })?;
         #[cfg(windows)]
-        let listener = bind_windows_listener(&socket_path).map_err(|error| {
+        let (listener, ipc_auth_token) = bind_windows_listener(&socket_path).map_err(|error| {
             format!(
                 "failed to bind daemon socket {}: {error}",
                 socket_path.display()
@@ -3640,6 +3647,19 @@ impl SystemwideController {
                             continue;
                         }
                     };
+
+                    // On Windows the loopback check above only proves locality,
+                    // not identity: any local user can dial the listener. The
+                    // per-bind auth file proves the client runs as the daemon
+                    // owner. Authenticate before consuming a client slot so
+                    // scanners cannot exhaust the slot budget.
+                    #[cfg(windows)]
+                    if let Err(error) =
+                        crate::ipc_transport::authenticate_client(&stream, &ipc_auth_token)
+                    {
+                        log::warn!("Rejected unauthenticated IPC client: {error}");
+                        continue;
+                    }
 
                     if !try_acquire_client_slot(&active_clients) {
                         log::warn!(

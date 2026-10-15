@@ -208,6 +208,30 @@ private func getSharedMemoryPath() -> String {
     return "/tmp/sotf-unknown/audio.shm"
 }
 
+/// Whether an opened shared-memory file is safe to map.
+///
+/// The daemon creates the file mode 0600 owned by the console user with a
+/// 0700 parent. Require all three plus a regular file: anything else is a
+/// planted or stale file that must never carry system audio. When no console
+/// user exists, only an explicit lab override path is accepted, matching the
+/// fail-closed `/tmp/sotf-unknown/audio.shm` rule above.
+private func sharedMemoryFileIsDaemonOwned(_ statBuf: stat) -> Bool {
+    guard (Int(statBuf.st_mode) & Int(S_IFMT)) == Int(S_IFREG) else { return false }
+    let mode = Int(statBuf.st_mode) & 0o777
+    guard mode & 0o077 == 0, mode & 0o600 == 0o600 else { return false }
+
+    var uid: uid_t = 0
+    var gid: gid_t = 0
+    if SCDynamicStoreCopyConsoleUser(nil, &uid, &gid) != nil, uid != 0 {
+        return statBuf.st_uid == uid
+    }
+    let environment = ProcessInfo.processInfo.environment
+    if let overridePath = environment["SOTF_HAL_SHARED_MEMORY_PATH"], !overridePath.isEmpty {
+        return true
+    }
+    return false
+}
+
 /// Header structure for shared memory region
 /// Must match the Rust side exactly (SharedAudioHeader in shared_memory.rs)
 struct SharedAudioHeader {
@@ -376,8 +400,10 @@ final class SharedAudioBuffer {
 
         // Open the daemon-owned file. The HAL plugin runs inside coreaudiod's
         // restricted environment, so creation/sizing/permissions are handled by
-        // the daemon before IO starts.
-        fileDescriptor = Darwin.open(currentPath, O_RDWR)
+        // the daemon before IO starts. O_NOFOLLOW refuses a symlinked path
+        // outright; the fstat checks below then pin the opened file to a
+        // console-user-owned, owner-only regular file.
+        fileDescriptor = Darwin.open(currentPath, O_RDWR | O_NOFOLLOW)
         if fileDescriptor < 0 {
             halLog("SharedMemory: open failed: \(String(cString: strerror(errno)))")
             return false
@@ -386,6 +412,12 @@ final class SharedAudioBuffer {
         var statBuf = stat()
         if fstat(fileDescriptor, &statBuf) != 0 {
             halLog("SharedMemory: fstat failed: \(String(cString: strerror(errno)))")
+            Darwin.close(fileDescriptor)
+            fileDescriptor = -1
+            return false
+        }
+        guard sharedMemoryFileIsDaemonOwned(statBuf) else {
+            halLog("SharedMemory: refusing file with unexpected owner/type/permissions")
             Darwin.close(fileDescriptor)
             fileDescriptor = -1
             return false

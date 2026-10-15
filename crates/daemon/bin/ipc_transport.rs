@@ -8,9 +8,11 @@
 //!   TOCTOU-safe stale-socket discipline in
 //!   `sotf_daemon::misc::bind_unix_socket`.
 //! - Windows: TCP loopback (`127.0.0.1`, OS-assigned port). The per-user
-//!   "socket path" names a port file holding the ASCII port number; clients
-//!   read the file and connect to `127.0.0.1:port`. Loopback-only peering is
-//!   the credential-check equivalent (see `is_loopback_addr` and
+//!   "socket path" names a port file holding the ASCII port number, plus a
+//!   sibling auth file holding a per-bind random credential; clients read
+//!   both, connect to `127.0.0.1:port`, and send the credential as the first
+//!   line. Loopback-only peering proves locality while the credential proves
+//!   owner identity (see `is_loopback_addr`, `authenticate_client`, and
 //!   `security::verify_peer_credentials`).
 //!
 //! Call sites use [`IpcStream`] for per-client handlers on both platforms.
@@ -20,7 +22,7 @@
 use std::ffi::OsString;
 #[cfg(any(windows, test))]
 use std::net::SocketAddr;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::path::Path;
 #[cfg(any(windows, test))]
 use std::path::PathBuf;
@@ -187,8 +189,12 @@ pub fn read_port_file(port_file: &Path) -> std::io::Result<u16> {
 /// Stale-port discipline mirrors `bind_unix_socket`: when the port file names
 /// a live daemon (connect succeeds) the bind fails with `AddrInUse`; only a
 /// dead entry is reclaimed, and only when it is a regular file.
+///
+/// Also generates a fresh [`IpcAuthToken`] per bind and publishes it at the
+/// token file beside the port file, so every daemon lifetime has its own
+/// client credential and a stale token never authenticates a new listener.
 #[cfg(windows)]
-pub fn bind_windows_listener(port_file: &Path) -> std::io::Result<IpcListener> {
+pub fn bind_windows_listener(port_file: &Path) -> std::io::Result<(IpcListener, IpcAuthToken)> {
     if let Ok(port) = read_port_file(port_file)
         && connect_loopback(port).is_ok()
     {
@@ -197,26 +203,34 @@ pub fn bind_windows_listener(port_file: &Path) -> std::io::Result<IpcListener> {
             "Another daemon instance is already running",
         ));
     }
-    if port_file.exists()
-        && !std::fs::symlink_metadata(port_file)
-            .map(|metadata| metadata.is_file())
-            .unwrap_or(false)
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AddrInUse,
-            format!(
-                "{} exists and is not a regular file; refusing to remove",
-                port_file.display()
-            ),
-        ));
+    let token_file = token_file_for_port_file(port_file);
+    for rendezvous_file in [port_file, token_file.as_path()] {
+        if rendezvous_file.exists()
+            && !std::fs::symlink_metadata(rendezvous_file)
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!(
+                    "{} exists and is not a regular file; refusing to remove",
+                    rendezvous_file.display()
+                ),
+            ));
+        }
     }
     if port_file.exists() {
         let _ = std::fs::remove_file(port_file);
     }
+    if token_file.exists() {
+        let _ = std::fs::remove_file(&token_file);
+    }
     let listener = IpcListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     write_port_file(port_file, port)?;
-    Ok(listener)
+    let token = generate_auth_token()?;
+    write_token_file(&token_file, &token)?;
+    Ok((listener, token))
 }
 
 /// Upper bound for a Windows loopback TCP connect, in seconds.
@@ -243,10 +257,286 @@ pub fn connect_loopback(port: u16) -> std::io::Result<std::net::TcpStream> {
 }
 
 /// Connect to the daemon through the Windows port file.
+///
+/// Reads the auth token published beside the port file and sends it as the
+/// first line so the daemon can tell the owning user apart from any other
+/// local user able to reach the loopback listener.
 #[cfg(windows)]
 pub fn connect_windows(port_file: &Path) -> std::io::Result<IpcStream> {
     let port = read_port_file(port_file)?;
-    connect_loopback(port)
+    let token = read_token_file(&token_file_for_port_file(port_file))?;
+    let mut stream = connect_loopback(port)?;
+    {
+        use std::io::Write;
+        stream.write_all(encode_auth_token_file_contents(&token).as_bytes())?;
+        stream.flush()?;
+    }
+    Ok(stream)
+}
+
+/// Bound for one Windows IPC authentication exchange, in seconds.
+///
+/// The daemon applies this as a deadline over the whole token line rather
+/// than per read so scanners holding connections open cannot pin handler
+/// threads. It mirrors the `IPC_CLIENT_*_TIMEOUT_SECS` discipline so no IPC
+/// path blocks forever.
+#[cfg(windows)]
+pub const WINDOWS_AUTH_TIMEOUT_SECS: u64 = 5;
+
+/// Length of the Windows IPC auth token in bytes.
+///
+/// 128 bits from the OS RNG is far beyond guessing over loopback, and the
+/// token file itself lives in the per-user directory so only the owning user
+/// can read it. Together they bind "can reach the listener" back to "owns
+/// the daemon", which loopback alone cannot express on a multi-user host.
+#[cfg(any(windows, test))]
+pub const IPC_AUTH_TOKEN_BYTES: usize = 32;
+
+/// Upper bound for one hex-encoded auth line: 64 hex digits plus a
+/// trailing newline, with headroom. Anything longer is rejected before it can
+/// grow an allocation.
+#[cfg(windows)]
+pub const IPC_AUTH_TOKEN_LINE_MAX_BYTES: usize = 80;
+
+/// Auth token proving a Windows IPC client runs as the daemon owner.
+///
+/// Loopback TCP has no `SO_PEERCRED` equivalent, so any local user can open
+/// the socket. The daemon publishes a fresh random token per listener bind
+/// in a user-private file next to the port file; clients send it back as the
+/// first line and the daemon drops connections that do not.
+#[cfg(any(windows, test))]
+#[derive(Clone)]
+pub struct IpcAuthToken([u8; IPC_AUTH_TOKEN_BYTES]);
+
+#[cfg(any(windows, test))]
+impl IpcAuthToken {
+    /// Wrap raw token bytes (parsed or generated, never logged).
+    pub fn from_bytes(bytes: [u8; IPC_AUTH_TOKEN_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the raw bytes for file publication or comparison.
+    pub fn bytes(&self) -> &[u8; IPC_AUTH_TOKEN_BYTES] {
+        &self.0
+    }
+}
+
+#[cfg(any(windows, test))]
+impl std::fmt::Debug for IpcAuthToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token is a credential: a Debug leak would print it into logs.
+        write!(formatter, "IpcAuthToken(...)")
+    }
+}
+
+/// Constant-time token equality so a wrong guess reveals nothing about how
+/// close it was. Lengths are fixed, so only the byte loop matters.
+#[cfg(any(windows, test))]
+pub fn auth_tokens_equal(left: &IpcAuthToken, right: &IpcAuthToken) -> bool {
+    let mut difference = 0u8;
+    for (a, b) in left.0.iter().zip(right.0.iter()) {
+        difference |= a ^ b;
+    }
+    difference == 0
+}
+
+/// Generate a fresh auth token from the OS RNG.
+#[cfg(any(windows, test))]
+pub fn generate_auth_token() -> std::io::Result<IpcAuthToken> {
+    use rand::TryRng;
+    let mut bytes = [0u8; IPC_AUTH_TOKEN_BYTES];
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|_| std::io::Error::other("OS RNG failed while generating IPC auth token"))?;
+    Ok(IpcAuthToken(bytes))
+}
+
+#[cfg(any(windows, test))]
+const TOKEN_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Encode a token for its file: lowercase hex with one trailing newline, so
+/// it stays human-inspectable like the adjacent port file.
+#[cfg(any(windows, test))]
+pub fn encode_auth_token_file_contents(token: &IpcAuthToken) -> String {
+    let mut text = String::with_capacity(IPC_AUTH_TOKEN_BYTES * 2 + 1);
+    for byte in token.0.iter() {
+        text.push(TOKEN_HEX_DIGITS[(byte >> 4) as usize] as char);
+        text.push(TOKEN_HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    text.push('\n');
+    text
+}
+
+/// Decode token-file contents back to a token.
+///
+/// Returns `None` for empty input, wrong length, or non-hex digits. Pure
+/// function so daemon, clients, and tests share the exact acceptance rule.
+#[cfg(any(windows, test))]
+pub fn decode_auth_token_file_contents(text: &str) -> Option<IpcAuthToken> {
+    let trimmed = text.trim();
+    if trimmed.len() != IPC_AUTH_TOKEN_BYTES * 2 {
+        return None;
+    }
+    if !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    // The length check above guarantees an even split, so the remainder is
+    // always empty; the debug assertion pins that coupling.
+    let (pairs, remainder) = trimmed.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    let mut bytes = [0u8; IPC_AUTH_TOKEN_BYTES];
+    for (index, chunk) in pairs.iter().enumerate() {
+        bytes[index] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    Some(IpcAuthToken(bytes))
+}
+
+/// Token-file location for a Windows port file.
+///
+/// `daemon.sock` publishes `daemon.token` beside it so one directory holds
+/// the whole loopback rendezvous and stale cleanup removes both together.
+#[cfg(any(windows, test))]
+pub fn token_file_for_port_file(port_file: &Path) -> PathBuf {
+    port_file.with_extension("token")
+}
+
+/// Atomically publish `token` at `token_file` (Windows).
+///
+/// Same discipline as [`write_port_file`]: a sibling temporary file renamed
+/// over the destination, never following a stale symlink, refusing to
+/// replace non-regular files.
+#[cfg(windows)]
+pub fn write_token_file(token_file: &Path, token: &IpcAuthToken) -> std::io::Result<()> {
+    if let Ok(metadata) = std::fs::symlink_metadata(token_file)
+        && !metadata.is_file()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "IPC token file {} exists and is not a regular file; refusing to replace",
+                token_file.display()
+            ),
+        ));
+    }
+    let parent = token_file.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "IPC token file {} has no parent directory",
+                token_file.display()
+            ),
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let temp_path = token_file.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    (|| {
+        std::fs::write(&temp_path, encode_auth_token_file_contents(token))?;
+        std::fs::rename(&temp_path, token_file)?;
+        Ok(())
+    })()
+    .map_err(|error: std::io::Error| {
+        let _ = std::fs::remove_file(&temp_path);
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to publish IPC token file {}: {error}",
+                token_file.display()
+            ),
+        )
+    })
+}
+
+/// Read a auth token back from `token_file` (Windows).
+#[cfg(windows)]
+pub fn read_token_file(token_file: &Path) -> std::io::Result<IpcAuthToken> {
+    let text = std::fs::read_to_string(token_file).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to read IPC token file {}: {error}",
+                token_file.display()
+            ),
+        )
+    })?;
+    decode_auth_token_file_contents(&text).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "IPC token file {} holds an invalid auth token",
+                token_file.display()
+            ),
+        )
+    })
+}
+
+/// Verify the auth token opening a Windows IPC connection.
+///
+/// Reads exactly one bounded line under a whole-exchange deadline and
+/// constant-time compares it against `expected`. Every failure — timeout,
+/// EOF, overlong line, undecodable token, mismatch — maps to one static
+/// error so callers and logs never echo a guess or distinguish why it was
+/// wrong.
+#[cfg(windows)]
+pub fn authenticate_client(
+    stream: &std::net::TcpStream,
+    expected: &IpcAuthToken,
+) -> std::io::Result<()> {
+    use std::io::Read;
+
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(WINDOWS_AUTH_TIMEOUT_SECS);
+    let mut line = Vec::with_capacity(IPC_AUTH_TOKEN_LINE_MAX_BYTES);
+    let mut byte = [0u8; 1];
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(auth_failed());
+        }
+        stream.set_read_timeout(Some(remaining))?;
+        match stream.read(&mut byte) {
+            Ok(0) => return Err(auth_failed()),
+            Ok(_) => {
+                line.push(byte[0]);
+                if byte[0] == b'\n' {
+                    break;
+                }
+                if line.len() > IPC_AUTH_TOKEN_LINE_MAX_BYTES {
+                    return Err(auth_failed());
+                }
+            }
+            Err(error) => return Err(auth_failed_with_kind(error)),
+        }
+    }
+    let presented = String::from_utf8(line).map_err(|_| auth_failed())?;
+    let presented = decode_auth_token_file_contents(&presented).ok_or_else(auth_failed)?;
+    if auth_tokens_equal(&presented, expected) {
+        Ok(())
+    } else {
+        Err(auth_failed())
+    }
+}
+
+/// Static authentication failure: never echoes the presented guess.
+#[cfg(windows)]
+fn auth_failed() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "IPC client authentication failed",
+    )
+}
+
+/// Map a transport error to the static failure while preserving its kind so
+/// timeouts stay distinguishable from refusals for logging.
+#[cfg(windows)]
+fn auth_failed_with_kind(error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), "IPC client authentication failed")
 }
 
 /// True when `path` currently names a live Windows daemon port file.
@@ -364,6 +654,67 @@ mod tests {
             started.elapsed()
                 < std::time::Duration::from_secs(WINDOWS_LOOPBACK_CONNECT_TIMEOUT_SECS),
             "refused connect must not wait out the timeout"
+        );
+    }
+
+    #[test]
+    fn auth_token_file_roundtrip_preserves_token() {
+        let token = generate_auth_token().expect("OS RNG must work in tests");
+        let encoded = encode_auth_token_file_contents(&token);
+        let decoded = decode_auth_token_file_contents(&encoded).expect("encoded token must decode");
+        assert!(auth_tokens_equal(&token, &decoded));
+    }
+
+    #[test]
+    fn auth_token_decode_rejects_garbage() {
+        let token = generate_auth_token().expect("OS RNG must work in tests");
+        let valid = encode_auth_token_file_contents(&token);
+        assert!(decode_auth_token_file_contents("").is_none());
+        assert!(decode_auth_token_file_contents("   \n").is_none());
+        assert!(decode_auth_token_file_contents("zz").is_none());
+        assert!(decode_auth_token_file_contents(&"zz".repeat(IPC_AUTH_TOKEN_BYTES)).is_none());
+        assert!(
+            decode_auth_token_file_contents(&valid[..valid.len() - 2]).is_none(),
+            "truncated credential must not decode"
+        );
+        let mut overlong = valid.clone();
+        overlong.push_str("00");
+        assert!(
+            decode_auth_token_file_contents(&overlong).is_none(),
+            "overlong credential must not decode"
+        );
+    }
+
+    #[test]
+    fn auth_token_equality_detects_single_bit_flip() {
+        let token = generate_auth_token().expect("OS RNG must work in tests");
+        assert!(auth_tokens_equal(&token, &token));
+        let mut bytes = *token.bytes();
+        bytes[0] ^= 1;
+        assert!(
+            !auth_tokens_equal(&token, &IpcAuthToken::from_bytes(bytes)),
+            "a one-bit guess must not authenticate"
+        );
+    }
+
+    #[test]
+    fn auth_token_debug_never_leaks_credential() {
+        let token = generate_auth_token().expect("OS RNG must work in tests");
+        let rendered = format!("{token:?}");
+        assert!(rendered.contains("IpcAuthToken"));
+        let hex = encode_auth_token_file_contents(&token);
+        assert!(
+            !rendered.contains(hex.trim()),
+            "Debug must not print the credential"
+        );
+    }
+
+    #[test]
+    fn token_file_sits_beside_port_file() {
+        let port = PathBuf::from("/tmp/sotf-auth-test/daemon.sock");
+        assert_eq!(
+            token_file_for_port_file(&port),
+            PathBuf::from("/tmp/sotf-auth-test/daemon.token")
         );
     }
 

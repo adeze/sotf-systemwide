@@ -50,11 +50,13 @@ pub fn verify_peer_credentials(stream: &UnixStream) -> Result<u32, String> {
 /// Verify that the connecting peer is authorized (Windows).
 ///
 /// Windows has no `SO_PEERCRED` equivalent for loopback TCP. The daemon binds
-/// `127.0.0.1` only, so authorization reduces to a loopback check: peers
-/// arriving on a loopback address are the local user by construction and map
-/// to the daemon UID class; anything else is denied. Returns the daemon UID
-/// analogue (`0`, the Owner class) on success so `classify_peer` keeps
-/// working unchanged.
+/// `127.0.0.1` only, so this check proves locality: peers arriving on a
+/// loopback address map to the daemon UID class and anything else is denied.
+/// Locality is necessary but not sufficient — any local user can dial
+/// loopback — so the accept loop additionally requires the per-bind auth
+/// credential (see `ipc_transport::authenticate_client`) before dispatching
+/// commands. Returns the daemon UID analogue (`0`, the Owner class) on
+/// success so `classify_peer` keeps working unchanged.
 #[cfg(windows)]
 pub fn verify_peer_credentials(stream: &std::net::TcpStream) -> Result<u32, String> {
     let peer = stream

@@ -5,7 +5,10 @@
 //
 // Security Model:
 // - ChaCha20-Poly1305 AEAD cipher
-// - Key is loaded from ~/.config/sotf/session.key
+// - Key is loaded from the HAL-readable copy at /tmp/sotf-{uid}/session.key
+//   (the daemon-private key under ~/.config is unreadable to sandboxed
+//   coreaudiod); lab overrides via SOTF_HAL_SESSION_KEY_PATH or
+//   SOTF_SYSTEMWIDE_RUNTIME_DIR
 // - Frame counter provides unique nonces
 // - Poly1305 authentication detects tampering
 //
@@ -36,7 +39,11 @@ private func getSessionKeyPath() -> String {
         return "/tmp/sotf-\(uid)/session.key"
     }
 
-    return "\(NSHomeDirectory())/.config/sotf/session.key"
+    // No console user: coreaudiod cannot reach any home directory, so fall
+    // back to a path that fails to open instead of probing an unreachable
+    // daemon-private key. Explicit lab overrides are still honored above.
+    halLog("ERROR: No console user found, cannot determine session key path")
+    return "/tmp/sotf-unknown/session.key"
 }
 
 /// Audio encryption cipher using ChaCha20-Poly1305.
@@ -270,14 +277,16 @@ final class EncryptionKeyManager {
         }
 
         do {
-            // Check file permissions - should be 0600 or 0640 (owner read/write only)
+            // The daemon publishes the session key mode 0600. Refuse anything
+            // else — group-readable key files leak the audio session key, so
+            // warn-and-continue is the wrong direction here.
             let attrs = try FileManager.default.attributesOfItem(atPath: keyPath)
             if let permissions = attrs[.posixPermissions] as? Int {
-                // Allow 0600 (owner rw) or 0640 (owner rw, group r)
                 let mode = permissions & 0o777
-                if mode != 0o600 && mode != 0o640 {
-                    halLog("Warning: Key file has insecure permissions \(String(mode, radix: 8)) (expected 600 or 640)")
-                    // Continue loading but warn - daemon may have created with different permissions
+                guard mode & 0o077 == 0, mode & 0o600 == 0o600 else {
+                    halLog("Key file has insecure permissions \(String(mode, radix: 8)) (expected 600); refusing to load")
+                    cipher = nil
+                    return
                 }
             }
 

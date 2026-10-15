@@ -186,37 +186,41 @@ pub(super) mod encryption_impl {
     }
 
     #[cfg(target_os = "macos")]
-    fn grant_coreaudiod_key_access(key_path: &Path) {
+    fn grant_coreaudiod_key_access(key_path: &Path) -> io::Result<()> {
+        // Without this grant the sandboxed HAL process cannot read the
+        // session key and encrypted audio degrades silently into silence.
+        // Fail loudly so startup reports the broken transport instead.
         for (path, acl) in coreaudiod_acl_targets(key_path) {
-            match Command::new("/bin/chmod")
+            let status = Command::new("/bin/chmod")
                 .arg("+a")
                 .arg(acl)
                 .arg(&path)
                 .status()
-            {
-                Ok(status) if status.success() => {
-                    log::debug!("Granted _coreaudiod key access on {}", path.display());
-                }
-                Ok(status) => {
-                    log::warn!(
-                        "Failed to grant _coreaudiod key access on {}: chmod exited with {}",
-                        path.display(),
-                        status
-                    );
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Failed to grant _coreaudiod key access on {}: {}",
-                        path.display(),
-                        e
-                    );
-                }
+                .map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "failed to grant _coreaudiod key access on {}: {error}",
+                            path.display()
+                        ),
+                    )
+                })?;
+            if status.success() {
+                log::debug!("Granted _coreaudiod key access on {}", path.display());
+            } else {
+                return Err(io::Error::other(format!(
+                    "failed to grant _coreaudiod key access on {}: chmod exited with {status}",
+                    path.display()
+                )));
             }
         }
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn grant_coreaudiod_key_access(_key_path: &Path) {}
+    fn grant_coreaudiod_key_access(_key_path: &Path) -> io::Result<()> {
+        Ok(())
+    }
 
     /// Encryption key manager for shared memory audio encryption
     #[allow(dead_code)]
@@ -248,7 +252,7 @@ pub(super) mod encryption_impl {
             } else {
                 Self::create_new_key(&key_path)?
             };
-            grant_coreaudiod_key_access(&key_path);
+            grant_coreaudiod_key_access(&key_path)?;
             Self::publish_hal_key_copy(&key)?;
 
             let fingerprint = compute_fingerprint(&key);
@@ -342,7 +346,7 @@ pub(super) mod encryption_impl {
         fn publish_hal_key_copy(key: &[u8; 32]) -> io::Result<()> {
             let path = get_hal_key_path();
             Self::publish_key_atomically(&path, key)?;
-            grant_coreaudiod_key_access(&path);
+            grant_coreaudiod_key_access(&path)?;
             log::debug!("Published HAL-readable encryption key copy");
             Ok(())
         }
@@ -352,7 +356,7 @@ pub(super) mod encryption_impl {
             log::info!("Force rotating encryption key...");
 
             let key = Self::create_new_key(&key_path)?;
-            grant_coreaudiod_key_access(&key_path);
+            grant_coreaudiod_key_access(&key_path)?;
             Self::publish_hal_key_copy(&key)?;
 
             let fingerprint = compute_fingerprint(&key);
