@@ -297,8 +297,14 @@ final class SharedAudioBuffer {
     private var backingDevice: dev_t = 0
     private var backingInode: ino_t = 0
 
-    /// Number of audio buffers in the ring (power of 2 recommended)
-    private let numBuffers = 8
+    /// Ring depth in blocks at the 48 kHz reference rate. The depth scales
+    /// with the sample rate so the ring holds the same *duration* at every
+    /// rate (8 blocks of 512 stereo frames: 85 ms at 48 kHz but only 42.7 ms
+    /// at 96 kHz). Must match Rust `ring_block_count` in driver-hal consts.
+    private func ringBufferCount(forSampleRate sampleRate: UInt32) -> Int {
+        let multiplier = max(1, (Int(sampleRate) + 47_999) / 48_000)
+        return 8 * multiplier
+    }
 
     /// Header pointer (start of shared memory)
     private var header: UnsafeMutablePointer<SharedAudioHeader>? {
@@ -386,7 +392,7 @@ final class SharedAudioBuffer {
         // Calculate sizes
         let headerSize = MemoryLayout<SharedAudioHeader>.size
         let alignedHeaderSize = (headerSize + 63) & ~63  // 64-byte aligned
-        audioCapacity = Int(bufferFrames) * Int(channelCount) * numBuffers
+        audioCapacity = Int(bufferFrames) * Int(channelCount) * ringBufferCount(forSampleRate: sampleRate)
         let audioSize = audioCapacity * MemoryLayout<Float>.size
         let requiredMemorySize = alignedHeaderSize + audioSize
 
@@ -483,7 +489,7 @@ final class SharedAudioBuffer {
             return false
         }
 
-        audioCapacity = Int(activeBufferFrames) * Int(activeChannelCount) * numBuffers
+        audioCapacity = Int(activeBufferFrames) * Int(activeChannelCount) * ringBufferCount(forSampleRate: activeSampleRate)
         if activeSampleRate != sampleRate
             || activeBufferFrames != bufferFrames
             || activeChannelCount != channelCount {
@@ -523,7 +529,7 @@ final class SharedAudioBuffer {
             return false
         }
 
-        let newCapacity = Int(bufferFrames) * Int(channelCount) * numBuffers
+        let newCapacity = Int(bufferFrames) * Int(channelCount) * ringBufferCount(forSampleRate: sampleRate)
         let headerSize = MemoryLayout<SharedAudioHeader>.size
         let alignedHeaderSize = (headerSize + 63) & ~63
         guard newCapacity > 0,
@@ -892,11 +898,17 @@ final class SharedAudioBuffer {
             capacity: audioCapacity
         )
         let available = audioCapacity - used
-        
+
+        // Overflow policy: drop ONLY the incoming record. The old behavior
+        // wrote anyway and reset readPosition = writePosition, discarding
+        // the entire queued backlog on every overflow — at 96 kHz records
+        // arrive twice as often, so one decoder stall destroyed ~85 ms of
+        // audio instead of a single block.
         if floatCount > available {
             _ = sotf_atomic_fetch_add_u64_previous(&header.pointee.encryptionOverflowCount, 1)
+            return 0
         }
-        
+
         let writeIndex = Int(writePos % UInt64(audioCapacity))
         let firstPartFloats = min(floatCount, audioCapacity - writeIndex)
         let firstPartBytes = firstPartFloats * 4
@@ -924,7 +936,9 @@ final class SharedAudioBuffer {
             }
             return 0
         }
-        if floatCount > available || writePos < readPos {
+        // Corruption repair only (floatCount > available returned above):
+        // cursors can never legitimately invert, so resync to the writer.
+        if writePos < readPos {
             atomicStore(&header.pointee.readPosition, writePos)
         }
         if atomicLoad(&header.pointee.active) == 0 {

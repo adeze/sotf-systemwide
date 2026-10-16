@@ -1291,6 +1291,12 @@ install_agent() {
     /usr/bin/ditto "$AGENT_TEMPLATE_DIR/$label.plist" "$destination"
     /usr/libexec/PlistBuddy -c "Set :StandardOutPath $stdout_path" "$destination"
     /usr/libexec/PlistBuddy -c "Set :StandardErrorPath $stderr_path" "$destination"
+    # The checked-in plists are templates: refuse to install one still
+    # carrying a placeholder, which would log to a literal __SOTF_ path.
+    if grep -q "__SOTF_" "$destination"; then
+        echo "ERROR: placeholder left in installed agent plist: $destination" >&2
+        exit 1
+    fi
     /usr/sbin/chown "$CONSOLE_USER:$CONSOLE_GROUP" "$destination"
     /bin/chmod 644 "$destination"
 }

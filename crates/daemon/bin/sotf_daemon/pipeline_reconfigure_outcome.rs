@@ -106,7 +106,10 @@ pub(super) fn handle_driver_config_change(
         );
         return;
     }
-    if requested_frames == 0 || requested_frames > 65536 {
+    // One bound everywhere (IPC, watcher, HAL): the shared-memory layout
+    // caps buffer_frames at MAX_HAL_BUFFER_FRAMES and Swift refuses larger
+    // values, so accepting 4097..=65536 here diverged daemon/HAL geometry.
+    if requested_frames == 0 || requested_frames > super::misc::MAX_BUFFER_FRAMES {
         log::warn!(
             "Invalid config request: buffer_frames={}, out of range",
             requested_frames

@@ -545,6 +545,7 @@ impl AudioDriver for CpalCaptureDriver {
             state.actual_frames,
             DRIVER_NAME,
             state.installed,
+            0,
         )
     }
 
@@ -594,8 +595,18 @@ impl AudioDriver for CpalCaptureDriver {
         };
 
         // Without a live stream there is nothing to renegotiate yet; the
-        // wants apply at the next `initialize`.
+        // wants normally apply at the next `initialize`. But `initialize`
+        // is one-shot from main(): a degraded first attempt (endpoint not
+        // enumerated yet at boot) latched `initialized` with no stream and
+        // no retry ever came. Retry initialization here so a PipeWire or
+        // WASAPI endpoint appearing seconds later starts capturing.
         if self.stream.is_none() {
+            if !self.state.lock().installed {
+                self.state.lock().initialized = false;
+                if let Err(error) = self.initialize() {
+                    return ConfigResult::Error(error);
+                }
+            }
             return ConfigResult::Accepted;
         }
 

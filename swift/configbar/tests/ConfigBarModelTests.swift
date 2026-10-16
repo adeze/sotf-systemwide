@@ -2,6 +2,23 @@ import XCTest
 @testable import ConfigBarModels
 
 final class ConfigBarModelTests: XCTestCase {
+    func testPipelineRecoveryEscalatesOnlyAfterRepeatedLatchedProbes() {
+        // Reachable-but-latched must restart: the first probe can land inside
+        // the bounded cold-start retry window, the second cannot.
+        XCTAssertFalse(ConfigBarDaemonWatchdog.shouldEscalateRecovery(consecutiveLatchedProbes: 0))
+        XCTAssertFalse(ConfigBarDaemonWatchdog.shouldEscalateRecovery(consecutiveLatchedProbes: 1))
+        XCTAssertTrue(ConfigBarDaemonWatchdog.shouldEscalateRecovery(consecutiveLatchedProbes: 2))
+        XCTAssertTrue(ConfigBarDaemonWatchdog.shouldEscalateRecovery(consecutiveLatchedProbes: 5))
+        XCTAssertEqual(
+            ConfigBarPipelineRecovery.error(fromDiagnostics: [
+                "pipeline_recovery": ["error": "restart_daemon", "actions": ["restart_daemon"]],
+            ]),
+            "restart_daemon"
+        )
+        XCTAssertNil(ConfigBarPipelineRecovery.error(fromDiagnostics: [:]))
+        XCTAssertNil(ConfigBarPipelineRecovery.error(fromDiagnostics: ["pipeline_recovery": [:]]))
+    }
+
     func testHALCaptureStatusUsesLiveDriverFlagAndLegacyTransportFallback() {
         XCTAssertEqual(
             ConfigBarHALCaptureStatus.resolve(

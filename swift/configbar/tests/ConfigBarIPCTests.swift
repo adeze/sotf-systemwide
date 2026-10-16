@@ -154,6 +154,13 @@ final class ConfigBarIPCTests: XCTestCase {
         let pipelineMutationCommands = [
             "set_device",
             "apply_configuration",
+            // A route switch restarts CoreAudio output like a device switch;
+            // on the 1 s default the UI used to report failure and revert
+            // the picker while the daemon went on to succeed.
+            "set_output_route",
+            "set_output_profile",
+            "assign_output_profile",
+            "delete_output_profile",
             "load_plugins",
             "load_plugin_artifact",
             "add_plugin",

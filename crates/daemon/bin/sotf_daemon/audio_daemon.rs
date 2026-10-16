@@ -55,8 +55,8 @@ use sotf_audio::plugins::PluginType;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Write};
 use std::net::Shutdown;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::consts::MAX_IPC_CLIENTS;
@@ -79,6 +79,15 @@ struct DriverConfigWire {
     driver_installed: bool,
     driver_ready: bool,
     platform_supported: bool,
+    /// HAL config-negotiation state (0=pending, 1=accepted, 2=negotiated,
+    /// 3=error). Zero on non-HAL drivers; enriched from the shared header
+    /// by `handle_get_driver_config` on macOS HAL builds.
+    config_status: u32,
+    /// Who initiated the last config change (1=HAL, 2=daemon).
+    config_source: u32,
+    /// Every sample rate the daemon accepts, so clients populate rate
+    /// pickers from the daemon's table instead of a hardcoded subset.
+    supported_sample_rates: [u32; 6],
 }
 
 /// Temporarily uses the engine's click-free mute ramp around a pipeline
@@ -151,6 +160,9 @@ impl From<&driver_common::DriverStatus> for DriverConfigWire {
             driver_installed: status.driver_installed,
             driver_ready: status.driver_ready,
             platform_supported: status.platform_supported,
+            config_status: 0,
+            config_source: 0,
+            supported_sample_rates: SUPPORTED_SAMPLE_RATES,
         }
     }
 }
@@ -706,9 +718,13 @@ impl SystemwideController {
             // fallback must play its own chain — never the missing
             // interface's correction. Fresh daemons (no profiles yet) start
             // empty and adopt it as `default` on first profile use.
-            let effective_device =
+            // Post-boot enumeration churn makes the 2 s registry cache a
+            // liar at cold start; invalidate before resolving anything.
+            daemon.device_registry.lock().invalidate();
+            let mut effective_device =
                 super::misc::resolve_effective_output_device(output_device.as_deref());
-            let startup_chain = daemon.resolve_startup_chain(effective_device.device.as_deref());
+            let mut startup_chain =
+                daemon.resolve_startup_chain(effective_device.device.as_deref());
 
             // Cold-start at the HAL transport's actual geometry. The timing
             // path below already adopts the HAL sample rate and buffer size;
@@ -809,6 +825,18 @@ impl SystemwideController {
                         }
                     }
                 }
+                // The fallback target can change while waiting (the
+                // desired device enumerates mid-retry). Re-resolve the
+                // chain so the newly opened device plays its own profile,
+                // not the first fallback's.
+                daemon.device_registry.lock().invalidate();
+                let next_effective =
+                    super::misc::resolve_effective_output_device(output_device.as_deref());
+                if next_effective.device != effective_device.device {
+                    effective_device = next_effective;
+                    startup_chain =
+                        daemon.resolve_startup_chain(effective_device.device.as_deref());
+                }
             }
         })
     }
@@ -826,13 +854,35 @@ impl SystemwideController {
                 initial_driver_status.capture_active,
             );
             log::info!("Driver config watcher thread started");
+            // An interface clock flapping between rates (96k <-> 48k while
+            // the device renegotiates) must not tear the pipeline down on
+            // every poll: a reported geometry only reconfigures once it has
+            // stayed stable for this long.
+            const CONFIG_CHANGE_DEBOUNCE: Duration = Duration::from_millis(500);
+            let mut pending_config: Option<(driver_common::DriverConfig, Instant)> = None;
             loop {
                 if !*daemon.running.lock() {
                     break;
                 }
 
-                let config_change = daemon.driver_manager.lock().poll_config_change();
-                if let Some(config) = config_change {
+                if let Some(config) = daemon.driver_manager.lock().poll_config_change() {
+                    match &pending_config {
+                        Some((pending, _)) if *pending == config => {}
+                        _ => pending_config = Some((config, Instant::now())),
+                    }
+                }
+                let stable_config = match &pending_config {
+                    Some((config, since)) if since.elapsed() >= CONFIG_CHANGE_DEBOUNCE => {
+                        let status = daemon.driver_manager.lock().status();
+                        (status.sample_rate == config.sample_rate
+                            && status.buffer_frames == config.buffer_frames
+                            && status.channel_count == config.channel_count)
+                            .then_some(*config)
+                    }
+                    _ => None,
+                };
+                if let Some(config) = stable_config {
+                    pending_config = None;
                     // Driver callbacks are intents handled by the same
                     // serialized control boundary as startup and IPC.
                     let _mutation = daemon.pipeline_mutation.lock();
@@ -1252,6 +1302,10 @@ impl SystemwideController {
                     "enabled": key_status.enabled,
                     "fingerprint": key_status.fingerprint,
                     "key_path": key_status.key_path,
+                    // Encrypted records dropped on ring overflow; non-zero
+                    // means the consumer fell behind (the 96 kHz scratch
+                    // signature) and is otherwise invisible in status.
+                    "overflow_count": driver_status.encryption_overflow_count,
                 },
                 "transport": transport,
                 "metering": metering,
@@ -2364,9 +2418,20 @@ impl SystemwideController {
     }
 
     pub(super) fn handle_get_available_plugins(&self) -> Response {
-        static AVAILABLE_PLUGINS: OnceLock<Value> = OnceLock::new();
-
-        let available = AVAILABLE_PLUGINS.get_or_init(|| {
+        // Deliberately uncached: defaults must be computed at the live
+        // driver rate (a once-per-process cache at a hardcoded 48 kHz handed
+        // wrong defaults to 96 kHz sessions) and a type whose defaults fail
+        // once must not be omitted for the daemon's whole lifetime. This is
+        // a picker-open path, not a hot path.
+        let sample_rate = {
+            let status = self.driver_manager.lock().status();
+            if status.sample_rate > 0 {
+                f64::from(status.sample_rate)
+            } else {
+                48_000.0
+            }
+        };
+        let available = {
             // Types withheld from the user-facing picker. Everything else in
             // `PluginType::all()` is served, matching the player pickers:
             // - `loudness_monitor`: daemon-owned metering, auto-injected at
@@ -2409,7 +2474,7 @@ impl SystemwideController {
                                 return None;
                             }
                         };
-                    let default_parameters = default_settings.to_plugin_config(48_000.0).parameters;
+                    let default_parameters = default_settings.to_plugin_config(sample_rate).parameters;
                     Some(serde_json::json!({
                         "type": engine_type,
                         "name": pt.name(),
@@ -2423,9 +2488,9 @@ impl SystemwideController {
                 .collect();
 
             serde_json::json!({ "plugins": plugins })
-        });
+        };
 
-        Response::ok(available.clone())
+        Response::ok(available)
     }
 
     pub(super) fn handle_add_plugin(&self, plugin: PluginConfig, index: Option<usize>) -> Response {
@@ -2440,7 +2505,16 @@ impl SystemwideController {
         };
         match index {
             Some(i) if i <= plugins.len() => plugins.insert(i, plugin),
-            _ => plugins.push(plugin),
+            Some(i) => {
+                // A client acting on a stale rack must learn its index was
+                // wrong (remove/update already error); silently appending
+                // here used to report success at the wrong position.
+                return Response::err(format!(
+                    "Plugin index {i} out of range (have {})",
+                    plugins.len()
+                ));
+            }
+            None => plugins.push(plugin),
         }
         self.reload_plugins_with_user_plugins(plugins)
     }
@@ -2996,11 +3070,18 @@ impl SystemwideController {
             let state = self.system_state.lock();
             let mut next = state.desired_spec();
             next.output_device = Some(stored_name.clone());
+            // A profile saved at one geometry used to run silently at the
+            // current spec's geometry; apply the profile's channels unless
+            // the route call explicitly overrides them.
             if let Some(channels) = input_channels {
                 next.input_channels = channels;
+            } else if profile.input_channels > 0 {
+                next.input_channels = profile.input_channels;
             }
             if let Some(channels) = output_channels {
                 next.output_channels = channels;
+            } else if profile.output_channels > 0 {
+                next.output_channels = profile.output_channels;
             }
             next.user_plugins = profile.plugins.clone();
             next.user_graph = profile.graph.clone();
@@ -3243,10 +3324,12 @@ impl SystemwideController {
             ));
         }
         if let Some(frames) = buffer_frames
-            && !(64..=4096).contains(&frames)
+            && !(super::misc::MIN_BUFFER_FRAMES..=super::misc::MAX_BUFFER_FRAMES).contains(&frames)
         {
             return Response::err(format!(
-                "Buffer frames must be between 64 and 4096, got: {frames}"
+                "Buffer frames must be between {} and {}, got: {frames}",
+                super::misc::MIN_BUFFER_FRAMES,
+                super::misc::MAX_BUFFER_FRAMES,
             ));
         }
         for (name, channels) in [("input", input_channels), ("output", output_channels)] {
@@ -3267,11 +3350,24 @@ impl SystemwideController {
                 48_000
             }
         });
-        let requested_buffer_frames = buffer_frames.unwrap_or({
-            if driver_status.buffer_frames > 0 {
+        let requested_buffer_frames = buffer_frames.unwrap_or_else(|| {
+            let current_frames = if driver_status.buffer_frames > 0 {
                 driver_status.buffer_frames
             } else {
                 512
+            };
+            // A rate-only change must keep the block *duration* constant:
+            // the same frames at 96 kHz invite callbacks twice as often and
+            // halve the scheduling headroom (scratchy noise at 96 kHz).
+            match sample_rate {
+                Some(new_rate) if new_rate != driver_status.sample_rate => {
+                    super::misc::scaled_buffer_frames_for_rate_change(
+                        driver_status.sample_rate,
+                        new_rate,
+                        current_frames,
+                    )
+                }
+                _ => current_frames,
             }
         });
         let fallback_input_channels = if driver_status.channel_count > 0 {
@@ -3434,7 +3530,19 @@ impl SystemwideController {
     pub(super) fn handle_get_driver_config(&self) -> Response {
         let driver = self.driver_manager.lock();
         let status = driver.status();
-        let wire = DriverConfigWire::from(&status);
+        // Mutated only by the HAL enrichment below.
+        #[cfg_attr(not(all(target_os = "macos", feature = "hal")), allow(unused_mut))]
+        let mut wire = DriverConfigWire::from(&status);
+
+        // The negotiation state lives in the shared header, not in
+        // DriverStatus; read it like handle_encryption_status does so the
+        // client's negotiation row can actually display. Without this the
+        // fields stayed 0 forever and the row never appeared.
+        #[cfg(all(target_os = "macos", feature = "hal"))]
+        if let Ok(buffer) = driver_hal::SharedAudioBuffer::open_default() {
+            wire.config_status = buffer.config_status();
+            wire.config_source = buffer.config_source();
+        }
 
         match serde_json::to_value(wire) {
             Ok(data) => Response::ok(data),
@@ -3555,6 +3663,11 @@ impl SystemwideController {
     }
 
     pub(super) fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // External-plugin sandbox options must exist before the first chain
+        // load (spawn_initial_driver_playback below).
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        super::plugin::install_plugin_sandbox();
+
         let socket_path = get_socket_path();
 
         // Ensure socket directory exists with secure permissions

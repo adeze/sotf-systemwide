@@ -968,7 +968,7 @@ mod ipc_safety_tests {
 
     fn fake_driver_state() -> Arc<Mutex<FakeDriverState>> {
         Arc::new(Mutex::new(FakeDriverState {
-            status: DriverStatus::new(true, true, true, 48_000, 2, 512, "Fake HAL", true),
+            status: DriverStatus::new(true, true, true, 48_000, 2, 512, "Fake HAL", true, 0),
             engine_ready: false,
             last_requested_config: None,
             requested_configs: Vec::new(),
@@ -980,7 +980,7 @@ mod ipc_safety_tests {
     }
 
     fn healthy_driver_status() -> DriverStatus {
-        DriverStatus::new(true, true, true, 48_000, 2, 512, "Fake HAL", true)
+        DriverStatus::new(true, true, true, 48_000, 2, 512, "Fake HAL", true, 0)
     }
 
     fn fault_codes(faults: &[Value]) -> Vec<&str> {
@@ -1821,6 +1821,28 @@ mod ipc_safety_tests {
             response["error"]
                 .as_str()
                 .is_some_and(|e| e.contains("Unsupported graph plugin artifact"))
+        );
+        assert!(daemon.system_state.lock().user_plugins().is_empty());
+    }
+
+    #[test]
+    fn testkit_add_plugin_rejects_out_of_range_index() {
+        // A client acting on a stale rack must get an error, not a silent
+        // append at the end of the chain (remove/update already error).
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(state);
+
+        let response = send_owner_ipc_command(
+            &daemon,
+            r#"{"command":"add_plugin","plugin":{"plugin_type":"gain","parameters":{}},"index":5}"#,
+        );
+
+        assert_eq!(response["success"], false);
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("out of range")),
+            "unexpected error: {response}"
         );
         assert!(daemon.system_state.lock().user_plugins().is_empty());
     }
@@ -3150,6 +3172,7 @@ mod command_roundtrip_tests {
             512,
             "macOS CoreAudio HAL",
             true,
+            0,
         );
         assert!(AudioDaemon::requires_playback_callback(&macos_hal));
 
@@ -3162,18 +3185,19 @@ mod command_roundtrip_tests {
             512,
             "Systemwide Lab Driver",
             true,
+            0,
         );
         assert!(!AudioDaemon::requires_playback_callback(&lab));
 
         let fake =
-            driver_common::DriverStatus::new(true, true, true, 48_000, 2, 512, "Fake HAL", true);
+            driver_common::DriverStatus::new(true, true, true, 48_000, 2, 512, "Fake HAL", true, 0);
         assert!(!AudioDaemon::requires_playback_callback(&fake));
 
-        let null = driver_common::DriverStatus::new(false, false, false, 0, 0, 0, "None", false);
+        let null = driver_common::DriverStatus::new(false, false, false, 0, 0, 0, "None", false, 0);
         assert!(!AudioDaemon::requires_playback_callback(&null));
 
         let other_production_driver =
-            driver_common::DriverStatus::new(true, true, true, 48_000, 2, 512, "PipeWire", true);
+            driver_common::DriverStatus::new(true, true, true, 48_000, 2, 512, "PipeWire", true, 0);
         assert!(AudioDaemon::requires_playback_callback(
             &other_production_driver
         ));
@@ -3613,6 +3637,11 @@ mod command_roundtrip_tests {
             "driver_installed",
             "driver_ready",
             "platform_supported",
+            // Added with the release audit fixes: negotiation state and the
+            // supported-rate table clients build pickers from.
+            "config_status",
+            "config_source",
+            "supported_sample_rates",
         ];
         let actual_fields: std::collections::BTreeSet<&str> = data
             .as_object()

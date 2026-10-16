@@ -49,6 +49,30 @@ public enum ConfigBarDaemonWatchdog {
     public static func shouldRestart(consecutiveFailures: Int) -> Bool {
         consecutiveFailures >= restartThreshold
     }
+
+    /// Consecutive latched-recovery probes before escalating to a daemon
+    /// restart. Reachability alone is not health: after a failed cold start
+    /// the daemon stays reachable but latched in `pipeline_recovery`, and
+    /// only a daemon restart (or a successful apply, which needs the user to
+    /// change something) clears it. Two probes (~10 s) ride out the bounded
+    /// cold-start retry window without restarting a daemon that is still
+    /// legitimately starting.
+    public static let recoveryEscalationThreshold = 2
+
+    public static func shouldEscalateRecovery(consecutiveLatchedProbes: Int) -> Bool {
+        consecutiveLatchedProbes >= recoveryEscalationThreshold
+    }
+}
+
+/// Extract the pipeline-recovery error from a `get_snapshot` diagnostics
+/// dictionary. Returns nil when the daemon reports no latched recovery.
+public enum ConfigBarPipelineRecovery {
+    public static func error(fromDiagnostics diagnostics: [String: Any]) -> String? {
+        guard let recovery = diagnostics["pipeline_recovery"] as? [String: Any] else {
+            return nil
+        }
+        return recovery["error"] as? String
+    }
 }
 
 /// Dispatch a potentially blocking daemon operation away from SwiftUI's main

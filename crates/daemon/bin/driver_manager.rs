@@ -195,6 +195,7 @@ impl LabDriver {
                 512,
                 "Systemwide Lab Driver",
                 true,
+                0,
             ),
             phase: 0.0,
             engine_ready: false,
@@ -330,7 +331,7 @@ mod tests {
         }
         fn shutdown(&mut self) {}
         fn status(&self) -> DriverStatus {
-            DriverStatus::new(true, true, false, 48_000, 2, 512, "counting", self.ready)
+            DriverStatus::new(true, true, false, 48_000, 2, 512, "counting", self.ready, 0)
         }
         fn read_audio(&mut self, buffer: &mut [f32]) -> usize {
             buffer.fill(0.0);

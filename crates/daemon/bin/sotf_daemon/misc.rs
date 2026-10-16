@@ -344,6 +344,15 @@ pub(super) fn sanitize_user_plugins(plugins: Vec<PluginConfig>) -> Vec<PluginCon
             } else if pt == "loudness_monitor" {
                 log::warn!("Stripping user-supplied loudness_monitor - daemon injects metering");
                 false
+            } else if pt == "spectrum_analyzer" || pt == "resampler" {
+                // Daemon-owned analysis/resampling stages with no user data
+                // path: graph building and artifact parsing strip these, so
+                // direct rack loads must not insert them either.
+                log::warn!(
+                    "Stripping daemon-owned '{}' plugin from chain - not user-insertable",
+                    pt
+                );
+                false
             } else {
                 true
             }
@@ -542,7 +551,14 @@ const DEVICE_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(5
 
 /// True when a startup failure looks like a device-availability race rather
 /// than a permanent configuration error. Unknown failures are never
-/// retried: only the engine's device-absence markers qualify.
+/// retried: only the engine's device-absence markers and two known transient
+/// races qualify.
+///
+/// The transient races are the playback-callback timeout (device enumerated
+/// but its stream not delivering callbacks yet) and the HAL config-ack
+/// timeout (CoreAudio still applying a requested configuration). Both are
+/// cold-start timing races that a manual output-device switch used to mask
+/// by simply trying again later.
 pub(super) fn startup_error_is_device_availability(error: Option<&str>) -> bool {
     let Some(message) = error else {
         return false;
@@ -554,9 +570,39 @@ pub(super) fn startup_error_is_device_availability(error: Option<&str>) -> bool 
         "needs playback stream recovery",
         "stream error reported",
         "device id changed",
+        "did not reach a hardware callback",
+        "timed out waiting for hal to apply config request",
     ]
     .iter()
     .any(|marker| folded.contains(marker))
+}
+
+/// Block duration bounds the daemon enforces on every driver configuration.
+///
+/// Kept as named constants so the IPC validation, the rate-scaling rule
+/// below, and the HAL negotiation clamp all agree on one range.
+pub(super) const MIN_BUFFER_FRAMES: u32 = 64;
+pub(super) const MAX_BUFFER_FRAMES: u32 = 4096;
+
+/// Scale a frame count across a sample-rate change so the *block duration*
+/// stays constant.
+///
+/// Buffer frames are meaningless without the rate: 512 frames is 10.67 ms at
+/// 48 kHz but only 5.33 ms at 96 kHz. A rate-only change that keeps the
+/// frame count doubles the callback and plugin invocations and halves every
+/// time-based headroom, which showed up as scratchy noise at 96 kHz. Returns
+/// the clamped 64..=4096 frame count for `to_rate`; `from_rate == 0` means
+/// "unknown", in which case the frame count is kept unchanged.
+pub(super) fn scaled_buffer_frames_for_rate_change(
+    from_rate: u32,
+    to_rate: u32,
+    frames: u32,
+) -> u32 {
+    if from_rate == 0 || frames == 0 {
+        return frames.clamp(MIN_BUFFER_FRAMES, MAX_BUFFER_FRAMES);
+    }
+    let scaled = ((f64::from(frames) * f64::from(to_rate) / f64::from(from_rate)).round()) as u32;
+    scaled.clamp(MIN_BUFFER_FRAMES, MAX_BUFFER_FRAMES)
 }
 
 /// Poll device enumeration until `name` appears, the timeout expires, or
@@ -864,9 +910,38 @@ mod tests {
         FallbackCandidate, acquire_daemon_instance_lock, clarify_device_absence_error,
         clarify_device_absence_error_with_devices, device_is_enumerated, list_audio_devices,
         resolve_effective_output_device, resolve_effective_output_device_with_candidates,
-        select_fallback_output_device, startup_error_is_device_availability,
-        wait_for_output_device,
+        scaled_buffer_frames_for_rate_change, select_fallback_output_device,
+        startup_error_is_device_availability, wait_for_output_device,
     };
+
+    #[test]
+    fn rate_change_scales_frames_to_keep_block_duration() {
+        // 512 frames at 48 kHz is 10.67 ms; the same duration at 96 kHz is
+        // 1024 frames. Keeping 512 frames would halve callback headroom.
+        assert_eq!(
+            scaled_buffer_frames_for_rate_change(48_000, 96_000, 512),
+            1024
+        );
+        assert_eq!(
+            scaled_buffer_frames_for_rate_change(96_000, 48_000, 1024),
+            512
+        );
+        assert_eq!(
+            scaled_buffer_frames_for_rate_change(48_000, 48_000, 512),
+            512
+        );
+        // Non-integer ratios round to nearest; bounds clamp huge swings.
+        assert_eq!(
+            scaled_buffer_frames_for_rate_change(44_100, 96_000, 512),
+            1115
+        );
+        assert_eq!(
+            scaled_buffer_frames_for_rate_change(48_000, 192_000, 4096),
+            4096
+        );
+        // Unknown current rate keeps the frame count, never zero.
+        assert_eq!(scaled_buffer_frames_for_rate_change(0, 96_000, 512), 512);
+    }
     #[cfg(unix)]
     use super::{bind_unix_socket, socket_is_unix_socket};
     use std::fs;
@@ -996,12 +1071,19 @@ mod tests {
         assert!(startup_error_is_device_availability(Some(
             "CoreAudio device id changed for 'EVO8' (Some(120) -> Some(286))"
         )));
+        // Cold-start timing races the retry loop must absorb: CoreAudio
+        // still applying the HAL config, device stream not yet delivering
+        // callbacks. The user-visible workaround used to be switching the
+        // output device away and back, i.e. exactly one manual retry.
+        assert!(startup_error_is_device_availability(Some(
+            "Failed to load plugin chain: Playback did not reach a hardware callback within 12000ms"
+        )));
+        assert!(startup_error_is_device_availability(Some(
+            "Failed to set HAL input channels: Timed out waiting for HAL to apply config request"
+        )));
         // Permanent failures must surface immediately, never burn retries.
         assert!(!startup_error_is_device_availability(None));
         assert!(!startup_error_is_device_availability(Some("")));
-        assert!(!startup_error_is_device_availability(Some(
-            "Failed to load plugin chain: Playback did not reach a hardware callback within 12000ms"
-        )));
         assert!(!startup_error_is_device_availability(Some(
             "Failed to parse loudness compensation params: invalid type"
         )));

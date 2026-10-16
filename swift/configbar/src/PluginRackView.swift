@@ -1016,8 +1016,13 @@ struct PluginGraphEditorView: View {
 // MARK: - Plugin Row
 
 struct PluginRowView: View {
+    @State private var confirmingRemove = false
     let plugin: PluginInstance
     let requiredOutputChannels: Int
+    /// Whether to show the per-plugin channel Stepper and bypass toggle.
+    /// Callers whose persistence schema cannot store that state (stored
+    /// output profiles) pass false so the controls never promise a no-op.
+    var showsPerPluginState: Bool = true
     let onEdit: () -> Void
     let onRemove: () -> Void
     let onStateChange: (_ inputChannels: Int?, _ bypassed: Bool?) -> Void
@@ -1043,27 +1048,29 @@ struct PluginRowView: View {
 
                 Spacer()
 
-                Stepper(
-                    value: Binding(
-                        get: { plugin.inputChannels },
-                        set: { onStateChange($0, nil) }
-                    ),
-                    in: 1...32
-                ) {
-                    Text("\(plugin.inputChannels) ch")
-                        .font(.caption)
-                        .frame(minWidth: 42)
-                }
-                .help("Set plugin input channel count")
+                if showsPerPluginState {
+                    Stepper(
+                        value: Binding(
+                            get: { plugin.inputChannels },
+                            set: { onStateChange($0, nil) }
+                        ),
+                        in: 1...32
+                    ) {
+                        Text("\(plugin.inputChannels) ch")
+                            .font(.caption)
+                            .frame(minWidth: 42)
+                    }
+                    .help("Set plugin input channel count")
 
-                Button {
-                    onStateChange(nil, !plugin.bypassed)
-                } label: {
-                    Image(systemName: plugin.bypassed ? "power.circle" : "power.circle.fill")
-                        .foregroundColor(plugin.bypassed ? .orange : .green)
+                    Button {
+                        onStateChange(nil, !plugin.bypassed)
+                    } label: {
+                        Image(systemName: plugin.bypassed ? "power.circle" : "power.circle.fill")
+                            .foregroundColor(plugin.bypassed ? .orange : .green)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(plugin.bypassed ? "Enable plugin" : "Bypass plugin")
                 }
-                .buttonStyle(.borderless)
-                .help(plugin.bypassed ? "Enable plugin" : "Bypass plugin")
 
                 Button(action: onEdit) {
                     Image(systemName: "slider.horizontal.3")
@@ -1071,12 +1078,24 @@ struct PluginRowView: View {
                 .buttonStyle(.borderless)
                 .help("Edit parameters")
 
-                Button(action: onRemove) {
+                Button {
+                    // Removal is destructive and had no confirmation: one
+                    // misclick dropped the plugin and its tuned parameters.
+                    confirmingRemove = true
+                } label: {
                     Image(systemName: "trash")
                         .foregroundColor(.red)
                 }
                 .buttonStyle(.borderless)
                 .help("Remove plugin")
+                .confirmationDialog(
+                    "Remove \(plugin.pluginName) from the chain?",
+                    isPresented: $confirmingRemove,
+                    titleVisibility: .visible
+                ) {
+                    Button("Remove \(plugin.pluginName)", role: .destructive, action: onRemove)
+                    Button("Cancel", role: .cancel) {}
+                }
             }
         }
         .padding(.vertical, 2)

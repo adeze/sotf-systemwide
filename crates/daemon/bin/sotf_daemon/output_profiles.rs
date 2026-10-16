@@ -65,13 +65,32 @@ impl OutputProfile {
         if self.name.len() > 80 {
             return Err("output profile name must not exceed 80 characters".into());
         }
+        // The chain was previously trusted until route-switch time, so a
+        // bad chain stored successfully and only failed when applied.
+        // Validate with the same rules the apply path uses, at upsert.
+        if !(1..=super::consts::MAX_HAL_CHANNELS).contains(&self.input_channels)
+            || !(1..=super::consts::MAX_HAL_CHANNELS).contains(&self.output_channels)
+        {
+            return Err(format!(
+                "output profile channel counts must be between 1 and {}, got {} in / {} out",
+                super::consts::MAX_HAL_CHANNELS,
+                self.input_channels,
+                self.output_channels
+            ));
+        }
+        for plugin in &self.plugins {
+            plugin
+                .validate()
+                .map_err(|error| format!("invalid plugin in profile chain: {error}"))?;
+        }
         match self.topology.as_str() {
             "rack" => Ok(()),
-            "graph" => self
-                .graph
-                .as_ref()
-                .map(|_| ())
-                .ok_or_else(|| "graph profiles must carry a graph".to_string()),
+            "graph" => match self.graph.as_ref() {
+                Some(graph) => graph
+                    .validate()
+                    .map_err(|error| format!("invalid graph in output profile: {error}")),
+                None => Err("graph profiles must carry a graph".to_string()),
+            },
             other => Err(format!(
                 "output profile topology must be \"rack\" or \"graph\", got \"{other}\""
             )),
@@ -620,6 +639,22 @@ mod tests {
         let mut graphless = rack_profile("graphless");
         graphless.topology = "graph".to_string();
         assert!(store.upsert(graphless).is_err());
+    }
+
+    #[test]
+    fn upsert_rejects_invalid_chains_and_channels() {
+        // Bad chains used to store fine and only fail at route-switch time.
+        let mut store = OutputProfileStore::default();
+        let mut bad = rack_profile("p-bad");
+        bad.plugins = vec![PluginConfig::new("  ", serde_json::json!({}))];
+        assert!(store.upsert(bad).is_err(), "empty plugin type must fail");
+
+        let mut bad_channels = rack_profile("p-bad");
+        bad_channels.input_channels = 0;
+        assert!(store.upsert(bad_channels).is_err(), "0 channels must fail");
+
+        let good = rack_profile("p-good");
+        assert!(store.upsert(good).is_ok());
     }
 
     #[test]

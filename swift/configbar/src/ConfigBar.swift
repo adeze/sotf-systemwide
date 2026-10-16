@@ -12,44 +12,6 @@ import Cocoa
 import CoreAudio
 import ConfigBarModels
 
-// MARK: - Audio Source Selection
-
-/// Represents the audio input source for the daemon
-enum AudioSource: String, CaseIterable, Identifiable {
-    case halDriver = "SotF HAL Driver"
-    case blackhole = "BlackHole"
-
-    var id: String { rawValue }
-
-    /// Pattern to match in device names
-    var devicePattern: String {
-        switch self {
-        case .halDriver: return "SotF"
-        case .blackhole: return "BlackHole"
-        }
-    }
-
-    /// Description for the user
-    var description: String {
-        switch self {
-        case .halDriver:
-            return "Use the SotF virtual audio driver to capture system audio directly"
-        case .blackhole:
-            return "Use BlackHole as a virtual audio device - set it as your macOS System Output"
-        }
-    }
-
-    /// Setup instructions
-    var setupInstructions: String {
-        switch self {
-        case .halDriver:
-            return "The HAL driver is automatically installed. Select it as your output device in Sound preferences."
-        case .blackhole:
-            return "1. Set BlackHole as your macOS System Output in Sound preferences\n2. The daemon will capture audio from BlackHole"
-        }
-    }
-}
-
 // MARK: - Audio Engine Client
 
 /// Client for communicating with the sotf-daemon via Unix socket
@@ -415,6 +377,9 @@ class AudioEngineClient {
         let halDriverReady: Bool?
         let routeProfileID: String?
         let routeDeviceUID: String?
+        /// Error text when the daemon is latched in `pipeline_recovery`,
+        /// nil while the pipeline is healthy.
+        let pipelineRecovery: String?
 
         static let fallback = Status(
             generation: nil,
@@ -436,7 +401,8 @@ class AudioEngineClient {
             captureActive: nil,
             halDriverReady: nil,
             routeProfileID: nil,
-            routeDeviceUID: nil
+            routeDeviceUID: nil,
+            pipelineRecovery: nil
         )
     }
 
@@ -491,6 +457,8 @@ class AudioEngineClient {
         let playbackFramesWritten = engine["playback_frames_written"] as? Int
         let playbackFramesDropped = engine["playback_frames_dropped"] as? Int
         let playbackEffectiveSampleRate = engine["playback_effective_sample_rate"] as? Int
+        let diagnostics = data["diagnostics"]?.value as? [String: Any] ?? [:]
+        let pipelineRecovery = ConfigBarPipelineRecovery.error(fromDiagnostics: diagnostics)
 
         return Status(
             generation: generation,
@@ -512,7 +480,8 @@ class AudioEngineClient {
             captureActive: captureActive,
             halDriverReady: halDriverReady,
             routeProfileID: routeProfileID,
-            routeDeviceUID: routeDeviceUID
+            routeDeviceUID: routeDeviceUID,
+            pipelineRecovery: pipelineRecovery
         )
     }
 
@@ -977,6 +946,8 @@ class AudioEngineClient {
         var driverReady: Bool = false
         var configStatus: UInt32 = 0  // 0=pending, 1=accepted, 2=negotiated, 3=error
         var configSource: UInt32 = 0  // 1=HAL, 2=Daemon
+        /// Daemon-supported rates for the picker; empty from older daemons.
+        var supportedSampleRates: [UInt32] = []
     }
 
     /// Get HAL driver configuration
@@ -999,6 +970,9 @@ class AudioEngineClient {
         config.driverReady = data["driver_ready"]?.value as? Bool ?? false
         config.configStatus = (data["config_status"]?.value as? Int).map { UInt32($0) } ?? 0
         config.configSource = (data["config_source"]?.value as? Int).map { UInt32($0) } ?? 0
+        if let rates = data["supported_sample_rates"]?.value as? [Int] {
+            config.supportedSampleRates = rates.map { UInt32($0) }
+        }
 
         return config
     }
@@ -1025,7 +999,8 @@ class AudioEngineClient {
         uid: String?,
         inputChannels: Int?,
         outputChannels: Int?,
-        profileID: String?
+        profileID: String?,
+        baseGeneration: UInt64?
     ) -> Response? {
         var command: [String: Any] = [
             "command": "set_output_route",
@@ -1042,6 +1017,12 @@ class AudioEngineClient {
         }
         if let profileID, !profileID.isEmpty {
             command["profile_id"] = profileID
+        }
+        // Route switches are pipeline mutations like apply_configuration:
+        // without the generation the daemon cannot reject a switch racing
+        // a concurrent chain edit, and the caller never learned it raced.
+        if let baseGeneration {
+            command["base_generation"] = baseGeneration
         }
         return sendCommand(command)
     }
@@ -1107,6 +1088,7 @@ class DaemonManager {
     private var restartRequested = false
     private var watchdogProbeInFlight = false
     private var consecutiveProbeFailures = 0
+    private var consecutiveLatchedRecoveryProbes = 0
     private let lifecycleQueue = DispatchQueue(
         label: "org.spinorama.sotf.configbar.daemon-lifecycle",
         qos: .utility
@@ -1421,7 +1403,14 @@ class DaemonManager {
             self.watchdogProbeInFlight = true
 
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                let reachable = AudioEngineClient().isDaemonReachable()
+                let client = AudioEngineClient()
+                let reachable = client.isDaemonReachable()
+                // Reachable is not healthy: after a failed cold start the
+                // daemon answers IPC but sits latched in pipeline_recovery
+                // until a daemon restart or a successful apply clears it.
+                let recovery = reachable
+                    ? client.getStatus(reuseConnection: false).pipelineRecovery
+                    : nil
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.watchdogProbeInFlight = false
@@ -1429,9 +1418,22 @@ class DaemonManager {
 
                     if reachable {
                         self.consecutiveProbeFailures = 0
+                        if let recovery {
+                            self.consecutiveLatchedRecoveryProbes += 1
+                            if ConfigBarDaemonWatchdog.shouldEscalateRecovery(
+                                consecutiveLatchedProbes: self.consecutiveLatchedRecoveryProbes
+                            ) {
+                                print("DaemonManager: Watchdog detected latched pipeline recovery (\(recovery)), restarting daemon...")
+                                self.consecutiveLatchedRecoveryProbes = 0
+                                self.startDaemon()
+                            }
+                        } else {
+                            self.consecutiveLatchedRecoveryProbes = 0
+                        }
                         return
                     }
 
+                    self.consecutiveLatchedRecoveryProbes = 0
                     self.consecutiveProbeFailures += 1
                     // Two consecutive failures mean the daemon is either
                     // gone or wedged; startDaemon() re-probes before acting.
@@ -1652,6 +1654,9 @@ public class StatusBarController: NSObject, ObservableObject {
     private func updateStatus() {
         guard !statusRequestInFlight else { return }
         statusRequestInFlight = true
+        // The HAL Driver menu item used to be computed once at launch and
+        // never refreshed (its updater had no call sites).
+        updateHALDriverStatus()
 
         AudioEngineClient.pollStatus { [weak self] status, reachable in
             guard let self = self else { return }
@@ -2157,9 +2162,10 @@ struct ConfigurationView: View {
     @State private var selectedDevice: String = ""
     @State private var volume: Float = 1.0
     // Audio Source Configuration
-    @State private var availableSources: [AudioSource] = []
-    @State private var selectedSource: AudioSource = .halDriver
-    @State private var sourceDetectionStatus: [AudioSource: Bool] = [:]
+    // The daemon has no capture-source concept: capture always comes from
+    // the HAL driver. A HAL/BlackHole picker here used to set local state
+    // and update the footer while sending nothing the daemon understands,
+    // so it was removed rather than left as a dead control.
 
     // HAL Configuration
     @State private var halInputChannels: Int = 2
@@ -2246,7 +2252,16 @@ struct ConfigurationView: View {
     @State private var daemonPipelineGeneration: UInt64? = nil
 
     let channelOptions = Array(1...32)
-    let sampleRateOptions: [UInt32] = [44100, 48000, 96000]
+    /// Rates offered before the daemon reports its table (older daemons).
+    static let fallbackSampleRateOptions: [UInt32] = [44100, 48000, 96000]
+
+    /// Rates from the daemon's supported table once known, so 88200,
+    /// 176400 and 192000 are not unreachable from the picker.
+    var sampleRateOptions: [UInt32] {
+        halConfig.supportedSampleRates.isEmpty
+            ? Self.fallbackSampleRateOptions
+            : halConfig.supportedSampleRates
+    }
     let bufferFramesOptions: [UInt32] = [128, 256, 512, 1024, 2048]
 
     private var selectedOutputDevice: AudioEngineClient.AudioDevice? {
@@ -2349,417 +2364,6 @@ struct ConfigurationView: View {
                 // Scrollable configuration content
                 ScrollView(.vertical, showsIndicators: true) {
                     VStack(spacing: 20) {
-
-            // Audio Source Section
-            GroupBox(label: Label("Audio Source", systemImage: "speaker.wave.3")) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Select how the daemon captures system audio")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    ForEach(AudioSource.allCases) { source in
-                        HStack {
-                            Button(action: {
-                                selectedSource = source
-                                applyHALConfiguration()
-                            }) {
-                                HStack {
-                                    Image(systemName: selectedSource == source ? "largecircle.fill.circle" : "circle")
-                                        .foregroundColor(selectedSource == source ? .accentColor : .secondary)
-                                    VStack(alignment: .leading) {
-                                        Text(source.rawValue)
-                                            .fontWeight(selectedSource == source ? .semibold : .regular)
-                                        Text(source.description)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-
-                            Spacer()
-
-                            // Status indicator
-                            if let isDetected = sourceDetectionStatus[source] {
-                                if isDetected {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundColor(.green)
-                                        Text("Detected")
-                                            .font(.caption)
-                                            .foregroundColor(.green)
-                                    }
-                                } else {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "exclamationmark.triangle.fill")
-                                            .foregroundColor(.orange)
-                                        Text("Not found")
-                                            .font(.caption)
-                                            .foregroundColor(.orange)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-
-                    // Setup instructions for selected source
-                    if selectedSource == .blackhole {
-                        Divider()
-                        VStack(alignment: .leading, spacing: 8) {
-                            Label("Setup Instructions", systemImage: "info.circle")
-                                .font(.headline)
-                            Text(selectedSource.setupInstructions)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.leading, 20)
-                        }
-                        .padding(.top, 8)
-                    }
-                }
-                .padding()
-            }
-
-            // HAL Input Section
-            GroupBox(label: Label("HAL Input (from macOS apps)", systemImage: "waveform.path")) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("The HAL driver captures audio from macOS applications")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    HStack {
-                        Text("Input Channels:")
-                            .font(.headline)
-
-                        Picker("", selection: $halInputChannels) {
-                            ForEach(channelOptions, id: \.self) { count in
-                                Text("\(count) channel\(count == 1 ? "" : "s")").tag(count)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .frame(width: 150)
-                        .onChange(of: halInputChannels) { newValue in
-                            syncMeterArrays(inputChannels: newValue)
-                            if programmaticInputChannelSync {
-                                programmaticInputChannelSync = false
-                                return
-                            }
-                            applyHALConfiguration()
-                        }
-
-                        Spacer()
-
-                        HStack(spacing: 4) {
-                            Image(systemName: "info.circle")
-                                .foregroundColor(.blue)
-                            Text("Usually 2 for stereo")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .padding()
-            }
-
-            // Audio Output Section
-            GroupBox(label: Label("Audio Output (to speakers)", systemImage: "hifispeaker")) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Output Device:")
-                            .font(.headline)
-
-                        Picker("Device", selection: $selectedDevice) {
-                            if physicalOutputDevices.isEmpty {
-                                Text(outputDevicePlaceholderText).tag("")
-                            }
-
-                            ForEach(physicalOutputDevices, id: \.name) { device in
-                                HStack {
-                                    Text(device.name)
-                                    if device.is_default {
-                                        Text("(default)")
-                                            .foregroundColor(.secondary)
-                                            .font(.caption)
-                                    }
-                                    if let channels = device.channels, let sampleRate = device.sample_rate {
-                                        Text("- \(channels)ch @ \(sampleRate/1000)kHz")
-                                            .foregroundColor(.secondary)
-                                            .font(.caption)
-                                    }
-                                }
-                                .tag(device.name)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .onChange(of: selectedDevice) { newDevice in
-                            guard !newDevice.isEmpty else { return }
-                            if programmaticDeviceSelection == newDevice {
-                                programmaticDeviceSelection = nil
-                                syncOutputChannelsToSelectedDevice(applyChange: false)
-                                return
-                            }
-                            guard !isVirtualDevice(newDevice) else {
-                                errorMessage = "Virtual audio devices cannot be used as Systemwide speaker output. Select hardware speakers/headphones here, and select SotF Virtual Audio in macOS Sound Output."
-                                showingError = true
-                                loadDevices()
-                                return
-                            }
-                            // A manual route change takes control back from
-                            // any automatic failover state.
-                            routeAutoFailedOver = false
-                            preferredOutputDeviceName = nil
-                            preferredOutputDeviceUID = nil
-                            let previousDevice = lastConfirmedDevice ?? lastDaemonSelectedDevice
-                            let previousOutputChannels = lastConfirmedOutputChannels
-                            let requestedOutputChannels = min(
-                                max(halOutputChannels, 1),
-                                selectedOutputDeviceChannelLimit ?? 32
-                            )
-                            if halOutputChannels != requestedOutputChannels {
-                                programmaticOutputChannelSync = true
-                                halOutputChannels = requestedOutputChannels
-                                syncMeterArrays(outputChannels: requestedOutputChannels)
-                            }
-                            let statusGeneration = beginDaemonMutation()
-                            deviceMutationGeneration &+= 1
-                            let mutationGeneration = deviceMutationGeneration
-                            deviceMutationInFlight = true
-                            let fields: [String: Any] = [
-                                "output_device": newDevice,
-                                "output_channels": requestedOutputChannels,
-                            ]
-                            sendApplyConfiguration(fields) { response in
-                                guard mutationGeneration == deviceMutationGeneration,
-                                      acceptsStatusSnapshot(statusGeneration) else { return }
-                                deviceMutationInFlight = false
-                                adoptPipelineGeneration(from: response)
-                                if response?.success == true {
-                                    lastConfirmedDevice = newDevice
-                                    lastDaemonSelectedDevice = newDevice
-                                    lastConfirmedOutputChannels = requestedOutputChannels
-                                } else {
-                                    errorMessage = response?.error ?? "Failed to set output device: \(newDevice)"
-                                    showingError = true
-                                    if let previous = previousDevice {
-                                        programmaticDeviceSelection = previous
-                                        selectedDevice = previous
-                                    }
-                                    if halOutputChannels != previousOutputChannels {
-                                        programmaticOutputChannelSync = true
-                                        halOutputChannels = previousOutputChannels
-                                        syncMeterArrays(outputChannels: previousOutputChannels)
-                                    }
-                                    loadDevices()
-                                }
-                            }
-                        }
-
-                        Button(action: {
-                            loadDevices()
-                        }) {
-                            Image(systemName: loadingDevices ? "hourglass" : "arrow.clockwise")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(loadingDevices)
-                        .help("Refresh output devices")
-                    }
-                    .onAppear {
-                        loadDevices()
-                    }
-
-                    Divider()
-
-                    HStack {
-                        Text("Output Channels:")
-                            .font(.headline)
-
-                        Picker("", selection: $halOutputChannels) {
-                            ForEach(outputChannelOptions, id: \.self) { count in
-                                Text("\(count) channel\(count == 1 ? "" : "s")").tag(count)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .frame(width: 150)
-                        .onChange(of: halOutputChannels) { newValue in
-                            syncMeterArrays(outputChannels: min(max(newValue, 1), 32))
-                            if programmaticOutputChannelSync {
-                                programmaticOutputChannelSync = false
-                                return
-                            }
-                            applyHALConfiguration()
-                        }
-
-                        Spacer()
-
-                        HStack(spacing: 4) {
-                            Image(systemName: "info.circle")
-                                .foregroundColor(.blue)
-                            Text(outputChannelsHelpText)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-
-                    Divider()
-
-                    HStack {
-                        Text("Volume:")
-                        Slider(value: $volume, in: 0...1)
-                            .onChange(of: volume) { newVolume in
-                                if programmaticVolumeSync {
-                                    programmaticVolumeSync = false
-                                    lastConfirmedVolume = newVolume
-                                    return
-                                }
-                                let statusGeneration = beginDaemonMutation()
-                                volumeMutationGeneration &+= 1
-                                let generation = volumeMutationGeneration
-                                let previousVolume = lastConfirmedVolume
-                                volumeUpdateWorkItem?.cancel()
-                                let work = DispatchWorkItem {
-                                    client.sendCommandAsync(["command": "set_volume", "volume": newVolume]) { response in
-                                        guard generation == volumeMutationGeneration,
-                                              acceptsStatusSnapshot(statusGeneration) else { return }
-                                        volumeUpdateWorkItem = nil
-                                        if response?.success != true {
-                                            errorMessage = response?.error ?? "Failed to set volume"
-                                            showingError = true
-                                            programmaticVolumeSync = true
-                                            volume = previousVolume
-                                        } else {
-                                            lastConfirmedVolume = newVolume
-                                        }
-                                    }
-                                }
-                                volumeUpdateWorkItem = work
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
-                            }
-                        Text("\(Int(volume * 100))%")
-                            .frame(width: 50)
-                    }
-                }
-                .padding()
-            }
-
-            // Plugin Configuration Section
-            GroupBox(label: Label("Outputs & DSP Profiles", systemImage: "hifispeaker.2")) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Button {
-                            loadPluginConfig()
-                        } label: {
-                            if loadingPluginConfiguration {
-                                HStack(spacing: 6) {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                    Text("Loading…")
-                                }
-                            } else {
-                                Text("Load Configuration...")
-                            }
-                        }
-                        .disabled(loadingPluginConfiguration || savingPluginConfiguration)
-
-                        Button {
-                            savePluginConfig()
-                        } label: {
-                            if savingPluginConfiguration {
-                                HStack(spacing: 6) {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                    Text("Saving…")
-                                }
-                            } else {
-                                Text("Save Configuration...")
-                            }
-                        }
-                        .disabled(loadingPluginConfiguration || savingPluginConfiguration)
-
-                        Spacer()
-                    }
-
-                    Divider()
-
-                    OutputProfilesView(
-                        client: client,
-                        entries: outputRouteEntries,
-                        profiles: outputProfiles,
-                        outputChannels: halOutputChannels,
-                        availableOutputChannels: selectedOutputDeviceChannelLimit,
-                        refreshTrigger: pluginRackRefreshToken,
-                        onSwitchRoute: { switchOutputRoute(to: $0, profileID: $1) },
-                        onAssignProfile: { assignProfile(to: $0, profileID: $1) },
-                        onSaveProfile: { saveOutputProfile($0, completion: $1) },
-                        onCreateProfile: { createOutputProfile(named: $0) },
-                        onRenameProfile: { renameOutputProfile(id: $0, name: $1) },
-                        onDeleteProfile: { deleteOutputProfile(id: $0) }
-                    )
-                }
-                .padding()
-            }
-
-            // Security Section
-            GroupBox(label: Label("Security", systemImage: "lock.shield")) {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Toggle("Encrypt audio data", isOn: $encryptionEnabled)
-                            .onChange(of: encryptionEnabled) { newValue in
-                                if encryptionToggleGuard.consumeProgrammaticChange() {
-                                    return
-                                }
-                                setEncryption(enabled: newValue)
-                            }
-
-                        Spacer()
-
-                        // Status indicator
-                        HStack(spacing: 4) {
-                            Image(systemName: encryptionEnabled ? "lock.fill" : "lock.open")
-                                .foregroundColor(encryptionEnabled ? .green : .secondary)
-                            if !encryptionFingerprint.isEmpty {
-                                Text(encryptionFingerprint.prefix(8) + "...")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                    }
-
-                    Text("When enabled, audio data is encrypted in memory to prevent other users or processes from accessing it. Recommended for multi-user systems.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-
-                    // Error state (conditional)
-                    if let error = encryptionError {
-                        HStack(spacing: 4) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.orange)
-                            Text(error)
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                        }
-                    }
-
-                    Divider()
-
-                    HStack {
-                        Button("Rotate Key") {
-                            rotateEncryptionKey()
-                        }
-                        .help("Generate a new encryption key")
-
-                        Spacer()
-
-                        Button("Refresh Status") {
-                            refreshEncryptionStatus()
-                        }
-                    }
-                }
-                .padding()
-            }
-            .onAppear {
-                refreshEncryptionStatus()
-            }
 
             // HAL Driver Configuration Section
             GroupBox(label: Label("HAL Driver Configuration", systemImage: "cpu")) {
@@ -2926,8 +2530,8 @@ struct ConfigurationView: View {
                     Image(systemName: "circle.fill")
                         .foregroundColor(daemonReachable ? .green : .secondary)
                     Text(daemonReachable
-                        ? "Connected to audio engine | Source: \(selectedSource.rawValue) | \(halInputChannels)ch in → \(halOutputChannels)ch out"
-                        : "Daemon not running — retrying… | Source: \(selectedSource.rawValue)")
+                        ? "Connected to audio engine | \(halInputChannels)ch in → \(halOutputChannels)ch out"
+                        : "Daemon not running — retrying…")
                         .foregroundColor(.secondary)
                 }
                 .padding()
@@ -3406,14 +3010,36 @@ struct ConfigurationView: View {
         }
         let previousDevice = lastConfirmedDevice ?? lastDaemonSelectedDevice
         let previousOutputChannels = lastConfirmedOutputChannels
+        let baseGeneration = daemonPipelineGeneration
         DispatchQueue.global(qos: .utility).async {
-            let response = AudioEngineClient().setOutputRoute(
+            let client = AudioEngineClient()
+            var response = client.setOutputRoute(
                 device: deviceName,
                 uid: deviceUID,
                 inputChannels: nil,
                 outputChannels: requestedOutputChannels,
-                profileID: profileID
+                profileID: profileID,
+                baseGeneration: baseGeneration
             )
+            // Mirror apply_configuration: one retry on generation conflict,
+            // adopting the daemon's current generation from a fresh status.
+            if configBarShouldRetryApplyConfiguration(
+                success: response?.success == true,
+                daemonError: response?.error,
+                mayRetry: true
+            ) {
+                let status = client.getStatus(reuseConnection: false)
+                if let freshGeneration = status.generation {
+                    response = client.setOutputRoute(
+                        device: deviceName,
+                        uid: deviceUID,
+                        inputChannels: nil,
+                        outputChannels: requestedOutputChannels,
+                        profileID: profileID,
+                        baseGeneration: UInt64(freshGeneration)
+                    )
+                }
+            }
             DispatchQueue.main.async {
                 guard mutationGeneration == deviceMutationGeneration,
                       acceptsStatusSnapshot(statusGeneration) else { return }
@@ -3717,7 +3343,6 @@ struct ConfigurationView: View {
         if physicalDevices.isEmpty {
             selectedDevice = ""
             startDeviceRecoveryPolling()
-            detectAvailableSources()
             return
         }
 
@@ -3758,9 +3383,6 @@ struct ConfigurationView: View {
         }
 
         syncOutputChannelsToSelectedDevice(applyChange: !selectedFromDaemon)
-
-        // Also detect available audio sources
-        detectAvailableSources()
     }
 
     private func syncOutputChannelsToSelectedDevice(applyChange: Bool) {
@@ -3774,28 +3396,6 @@ struct ConfigurationView: View {
         halOutputChannels = limit
         if applyChange {
             applyHALConfiguration()
-        }
-    }
-
-    /// Detect which audio sources (HAL driver, BlackHole) are available on the system
-    private func detectAvailableSources() {
-        // Check each source type against available devices
-        for source in AudioSource.allCases {
-            let isDetected = devices.contains { device in
-                device.name.contains(source.devicePattern)
-            }
-            sourceDetectionStatus[source] = isDetected
-        }
-
-        // Update available sources list
-        availableSources = AudioSource.allCases.filter { source in
-            sourceDetectionStatus[source] == true
-        }
-
-        // If current selection is not available, switch to first available
-        if let firstAvailable = availableSources.first,
-           sourceDetectionStatus[selectedSource] != true {
-            selectedSource = firstAvailable
         }
     }
 

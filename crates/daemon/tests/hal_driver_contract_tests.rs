@@ -448,8 +448,8 @@ fn swift_shared_memory_is_open_only_for_restricted_hal_process() {
     let source = read_repo_file("sotf-systemwide/swift/driver-hal/Sources/SharedMemory.swift");
 
     assert!(
-        source.contains("Darwin.open(currentPath, O_RDWR)"),
-        "HAL should open the daemon-owned shared-memory file without creating it"
+        source.contains("Darwin.open(currentPath, O_RDWR | O_NOFOLLOW)"),
+        "HAL should open the daemon-owned shared-memory file without creating it or following symlinks"
     );
     assert!(
         !source.contains("O_CREAT"),

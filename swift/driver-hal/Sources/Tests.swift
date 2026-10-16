@@ -166,7 +166,9 @@ final class HALDriverTests {
         let sampleRate: UInt32 = 48_000
         let bufferFrames: UInt32 = 64
         let channelCount: UInt32 = 2
-        let audioCapacity = Int(bufferFrames) * Int(channelCount) * 8
+        // The daemon sizes the file for the deepest negotiated rate: at
+        // 96 kHz the ring holds 2x blocks, so the fixture must too.
+        let audioCapacity = Int(bufferFrames) * Int(channelCount) * 16
         let headerSize = MemoryLayout<SharedAudioHeader>.size
         let alignedHeaderSize = (headerSize + 63) & ~63
         let totalSize = alignedHeaderSize + audioCapacity * MemoryLayout<Float>.size
@@ -292,7 +294,9 @@ final class HALDriverTests {
         let bufferFrames: UInt32 = 64
         let activeChannels: UInt32 = 2
         let pendingChannels: UInt32 = 8
-        let audioCapacity = Int(bufferFrames) * Int(pendingChannels) * 8
+        // Sized for the deepest negotiated rate (96 kHz -> 2x ring blocks),
+        // matching how the daemon creates the real file.
+        let audioCapacity = Int(bufferFrames) * Int(pendingChannels) * 16
         let alignedHeaderSize = (MemoryLayout<SharedAudioHeader>.size + 63) & ~63
         let totalSize = alignedHeaderSize + audioCapacity * MemoryLayout<Float>.size
 

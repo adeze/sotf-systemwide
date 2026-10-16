@@ -223,6 +223,7 @@ struct ProfileDetailHeader: View {
 
     @State private var showingRename = false
     @State private var renameText = ""
+    @State private var confirmingDeleteProfile = false
 
     private var currentProfile: OutputProfileModel? {
         profiles.first { $0.id == entry.profileID }
@@ -298,11 +299,23 @@ struct ProfileDetailHeader: View {
                     .font(.caption)
                     if current.id != ConfigBarOutputProfiles.defaultProfileID {
                         Button("Delete") {
-                            onDeleteProfile(current.id)
+                            // Deleting a profile is destructive and had no
+                            // confirmation; name the profile before firing.
+                            confirmingDeleteProfile = true
                         }
                         .buttonStyle(.link)
                         .font(.caption)
                         .foregroundColor(.red)
+                        .confirmationDialog(
+                            "Delete profile “\(current.name)”?",
+                            isPresented: $confirmingDeleteProfile,
+                            titleVisibility: .visible
+                        ) {
+                            Button("Delete \(current.name)", role: .destructive) {
+                                onDeleteProfile(current.id)
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        }
                     }
                 }
                 Spacer()
@@ -473,6 +486,11 @@ struct ProfileRackEditor: View {
                         PluginRowView(
                             plugin: plugin,
                             requiredOutputChannels: safeChannelCount,
+                            // Profile rack entries persist only type+params
+                            // in the daemon schema; per-plugin channel and
+                            // bypass state would be dropped on save, so the
+                            // controls are hidden here instead of lying.
+                            showsPerPluginState: false,
                             onEdit: { editingPluginID = plugin.id },
                             onRemove: { removePlugin(plugin.id) },
                             onStateChange: { inputChannels, bypassed in
@@ -551,7 +569,11 @@ struct ProfileRackEditor: View {
                 PluginEditSheet(
                     plugin: plugin,
                     descriptors: descriptors(for: plugin.pluginType),
-                    onApply: { _ in
+                    onApply: { newParams in
+                        // Forward the edited parameters into the draft
+                        // instance; discarding them (the old `{ _ in }`)
+                        // silently threw away every profile parameter edit.
+                        plugin.parameters = newParams
                         touchDraft()
                         commitDraft()
                         return true

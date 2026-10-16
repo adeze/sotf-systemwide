@@ -129,8 +129,17 @@ sign_macho_file() {
     local file_path="$1"
     local -a sign_args=(--force --sign "$DEVELOPER_ID" --options runtime --timestamp)
     if is_desktop_code "$file_path"; then
+        # Fail here with a named file instead of deep inside codesign.
+        [ -f "$DESKTOP_ENTITLEMENTS" ] || {
+            log_error "desktop entitlements missing: $DESKTOP_ENTITLEMENTS"
+            exit 1
+        }
         sign_args+=(--entitlements "$DESKTOP_ENTITLEMENTS")
     elif [ "${file_path##*/}" = sotf-external-plugin-worker ]; then
+        [ -f "$PLUGIN_WORKER_ENTITLEMENTS" ] || {
+            log_error "plugin worker entitlements missing: $PLUGIN_WORKER_ENTITLEMENTS"
+            exit 1
+        }
         sign_args+=(--entitlements "$PLUGIN_WORKER_ENTITLEMENTS")
     fi
 

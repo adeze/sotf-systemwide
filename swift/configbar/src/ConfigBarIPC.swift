@@ -115,7 +115,9 @@ public enum ConfigBarIPC {
         switch command["command"] as? String {
         case "get_available_plugins":
             return pluginCatalogMaxResponseBytes
-        case "dump_state", "get_snapshot", "get_plugins":
+        case "dump_state", "get_snapshot", "get_plugins", "get_output_profiles":
+            // The daemon permits a 256 KiB profile store; on the 64 KiB
+            // default, large profile sets silently failed to load.
             return structuredMaxResponseBytes
         default:
             return defaultMaxResponseBytes
@@ -125,10 +127,18 @@ public enum ConfigBarIPC {
     /// Pipeline mutations can synchronously stop and recreate CoreAudio output.
     /// Keep polling commands on the short deadline, but allow bounded headroom
     /// for hardware device startup before treating the daemon reply as lost.
+    /// `set_output_route` and the output-profile writes belong here too: a
+    /// route switch triggers the same CoreAudio restart, and treating its 1 s
+    /// default as failure made the UI report a failed switch and revert the
+    /// picker while the daemon later succeeded.
     public static func responseTimeoutMicros(for command: [String: Any]) -> useconds_t {
         switch command["command"] as? String {
         case "set_device",
              "apply_configuration",
+             "set_output_route",
+             "set_output_profile",
+             "assign_output_profile",
+             "delete_output_profile",
              "load_plugins",
              "load_plugin_artifact",
              "load_plugin_artifact_path",

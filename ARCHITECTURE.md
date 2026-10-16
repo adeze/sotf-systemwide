@@ -34,8 +34,8 @@ The current code is split into four major surfaces:
 | --- | --- | --- |
 | Configbar toolbar | `crates/daemon/configbar/src/*.swift` | macOS menu bar app, daemon lifecycle, user commands, plugin rack UI, metering UI, hardware-device recovery polling, menu bar status icon |
 | Daemon | `crates/daemon/bin/sotf_daemon.rs` | IPC server, command authorization, playback lifecycle, plugin-chain orchestration, output device choice, encryption commands |
-| Driver abstraction | `crates/driver-common/src/lib.rs` | Cross-platform single-owner `AudioDriver` trait, `DriverStatus`, `DriverConfig`, `ConfigResult`, `DriverError`, `NullDriver` fallback |
-| macOS HAL bridge | `crates/driver-hal/src/*`, `crates/driver-hal/swift/Sources/*` | Shared-memory protocol, encrypted audio records, CoreAudio HAL driver implementation, Rust `HalDriver` adapter |
+| Driver abstraction | `../sotf-daw/crates/driver-common/src/lib.rs` | Cross-platform single-owner `AudioDriver` trait, `DriverStatus`, `DriverConfig`, `ConfigResult`, `DriverError`, `NullDriver` fallback |
+| macOS HAL bridge | `../sotf-daw/crates/driver-hal/src/*`, `swift/driver-hal/Sources/*` | Shared-memory protocol, encrypted audio records, CoreAudio HAL driver implementation, Rust `HalDriver` adapter |
 | Installer scripts | `scripts/build-systemwide.sh` | App bundle, package/DMG build, running-system quiesce, HAL driver replacement, stale runtime cleanup |
 
 The daemon also depends on the workspace audio engine and plugin stack:
@@ -171,12 +171,16 @@ capture drivers:
 - The Configbar watchdog probes IPC health (`isDaemonReachable`) rather than
   only checking child-process liveness, so a hung-but-alive daemon that still
   holds the socket is detected and restarted after two consecutive failed
-  probes.
+  probes. A reachable daemon latched in `pipeline_recovery` (failed cold
+  start) is also escalated to a restart after two consecutive latched probes:
+  reachability alone is not health.
 
-On Linux, the daemon continues to use the cross-platform `NullDriver` unless a
-test selects the deterministic lab driver. On Windows, only `driver-common` and
-the `NullDriver` contract are currently portable; a Windows APO implementation
-remains planned work.
+On Linux and Windows the daemon captures through the cpal-backed
+`CpalCaptureDriver` (bounded drop-oldest queue; `SOTF_CAPTURE_DEVICE` selects
+the endpoint, default input otherwise — a PipeWire monitor source on Linux, a
+WASAPI capture or virtual-cable endpoint on Windows). `NullDriver` remains as
+the status-only fallback (`SOTF_SYSTEMWIDE_DRIVER=null`), and tests may select
+the deterministic lab driver.
 
 ## Component View
 

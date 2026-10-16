@@ -62,14 +62,14 @@ fails.
 ### Platform support
 
 - **macOS**: Full support via CoreAudio HAL driver (`--features hal`)
-- **Linux**: Daemon and `NullDriver` fallback are supported; a native PipeWire
-  filter node is planned
-- **Windows**: The `driver-common` / `NullDriver` contract is portable; the
-  daemon transport and native APO driver are planned
+- **Linux**: The daemon captures through the cpal-backed driver
+  (`CpalCaptureDriver`, bounded drop-oldest queue; `SOTF_CAPTURE_DEVICE`
+  selects the endpoint, default input otherwise — typically a PipeWire
+  monitor source). `NullDriver` remains the status-only fallback.
+- **Windows**: Same cpal capture path (WASAPI capture endpoint). Render-
+  endpoint loopback is not exposed via cpal, so system-audio capture needs
+  a virtual-cable device selected with `SOTF_CAPTURE_DEVICE`.
 - **Fallback**: `NullDriver` compiles everywhere, reports `platform_supported: false`
-
-Linux and Windows checks validate the existing fallback contract; they do not
-imply that system audio is captured on those platforms yet.
 
 ## Building
 
@@ -229,8 +229,9 @@ for linear topology and opens its graph editor for DAG topology.
 
 ## Sub-crate documentation
 
-Each sub-crate has its own README:
+This repo contains only the daemon crate; driver crates live in the sibling
+`sotf-daw` repo (see `ARCHITECTURE.md` for the full layout):
 
 - [daemon/README.md](crates/daemon/README.md)
-- [driver-hal/README.md](crates/driver-hal/README.md)
+- [driver-hal README](../sotf-daw/crates/driver-hal/README.md)
 - [daemon/configbar/README_CONFIGURATION.md](crates/daemon/configbar/README_CONFIGURATION.md)
