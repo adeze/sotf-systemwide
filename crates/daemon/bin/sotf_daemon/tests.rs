@@ -1,6 +1,6 @@
 #![allow(clippy::field_reassign_with_default)]
 use super::audio_daemon::{
-    AudioDaemon, CaptureResumeTracker, METERING_LATENCY_BUDGET_MICROS,
+    AudioDaemon, CaptureResumeTracker, ConfigChangeDebouncer, METERING_LATENCY_BUDGET_MICROS,
     PIPELINE_RESPONSE_BUDGET_BYTES, PLAYBACK_IDLE_REBUILD_THRESHOLD, RuntimeTelemetry,
     changed_plugin_parameters, encode_plugin_param_value, join_initial_playback_thread,
     pipeline_timing_after_config_request, rack_plugins_to_linear_graph, reorder_linear_graph,
@@ -1364,6 +1364,67 @@ mod ipc_safety_tests {
             3,
             true,
         ));
+    }
+
+    #[test]
+    fn config_change_debouncer_applies_one_shot_request_after_quiet_window() {
+        // Regression: the HAL requests 96 kHz once at startup while the
+        // applied geometry is still 48 kHz. poll_config_change consumes the
+        // request, so later polls return None; the request must still be
+        // applied after the debounce window instead of waiting forever for
+        // the applied status to match it.
+        let started = std::time::Instant::now();
+        let requested = driver_common::DriverConfig::new(96_000, 512, 2);
+        let mut debouncer = ConfigChangeDebouncer::new();
+
+        assert_eq!(debouncer.observe(started, Some(requested)), None);
+        assert_eq!(
+            debouncer.observe(
+                started + ConfigChangeDebouncer::DEBOUNCE - std::time::Duration::from_millis(1),
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            debouncer.observe(started + ConfigChangeDebouncer::DEBOUNCE, None),
+            Some(requested)
+        );
+        // Applied exactly once.
+        assert_eq!(
+            debouncer.observe(started + ConfigChangeDebouncer::DEBOUNCE * 2, None,),
+            None
+        );
+    }
+
+    #[test]
+    fn config_change_debouncer_flapping_requests_reset_the_window() {
+        let started = std::time::Instant::now();
+        let rate_96k = driver_common::DriverConfig::new(96_000, 512, 2);
+        let rate_48k = driver_common::DriverConfig::new(48_000, 512, 2);
+        let mut debouncer = ConfigChangeDebouncer::new();
+
+        assert_eq!(debouncer.observe(started, Some(rate_96k)), None);
+        // A different request inside the window restarts the clock.
+        assert_eq!(
+            debouncer.observe(
+                started + std::time::Duration::from_millis(400),
+                Some(rate_48k),
+            ),
+            None
+        );
+        // The original deadline passes with no application...
+        assert_eq!(
+            debouncer.observe(started + ConfigChangeDebouncer::DEBOUNCE, None),
+            None
+        );
+        // ...and the latest request wins once it stays quiet long enough.
+        assert_eq!(
+            debouncer.observe(
+                started + std::time::Duration::from_millis(400) + ConfigChangeDebouncer::DEBOUNCE,
+                None,
+            ),
+            Some(rate_48k)
+        );
     }
 
     #[test]

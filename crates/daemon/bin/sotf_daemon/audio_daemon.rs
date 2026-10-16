@@ -533,6 +533,51 @@ impl CaptureResumeTracker {
     }
 }
 
+/// Debounces HAL-initiated config requests so an interface clock flapping
+/// between rates while it renegotiates does not tear the pipeline down on
+/// every poll.
+///
+/// Stability is judged by the *requested* config staying unchanged for the
+/// debounce interval. It must never be judged against the driver's applied
+/// status: `poll_config_change` consumes each request exactly once, and the
+/// applied geometry only changes *after* the reconfigure this debouncer
+/// gates — requiring status to match the request first deadlocks startup
+/// (HAL requests 96 kHz, status stays 48 kHz, request dropped forever).
+#[derive(Debug)]
+pub(super) struct ConfigChangeDebouncer {
+    pending: Option<(driver_common::DriverConfig, Instant)>,
+}
+
+impl ConfigChangeDebouncer {
+    pub(super) const DEBOUNCE: Duration = Duration::from_millis(500);
+
+    pub(super) fn new() -> Self {
+        Self { pending: None }
+    }
+
+    /// Feed one `poll_config_change` result; returns the config to apply
+    /// once it has been the latest distinct request for the debounce window.
+    pub(super) fn observe(
+        &mut self,
+        now: Instant,
+        polled: Option<driver_common::DriverConfig>,
+    ) -> Option<driver_common::DriverConfig> {
+        if let Some(config) = polled {
+            match &self.pending {
+                Some((pending, _)) if *pending == config => {}
+                _ => self.pending = Some((config, now)),
+            }
+        }
+        let (config, since) = self.pending?;
+        if now.saturating_duration_since(since) >= Self::DEBOUNCE {
+            self.pending = None;
+            Some(config)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct SystemwideController {
     pub(super) manager: Arc<Mutex<AudioEngineManager>>,
@@ -854,35 +899,14 @@ impl SystemwideController {
                 initial_driver_status.capture_active,
             );
             log::info!("Driver config watcher thread started");
-            // An interface clock flapping between rates (96k <-> 48k while
-            // the device renegotiates) must not tear the pipeline down on
-            // every poll: a reported geometry only reconfigures once it has
-            // stayed stable for this long.
-            const CONFIG_CHANGE_DEBOUNCE: Duration = Duration::from_millis(500);
-            let mut pending_config: Option<(driver_common::DriverConfig, Instant)> = None;
+            let mut config_debouncer = ConfigChangeDebouncer::new();
             loop {
                 if !*daemon.running.lock() {
                     break;
                 }
 
-                if let Some(config) = daemon.driver_manager.lock().poll_config_change() {
-                    match &pending_config {
-                        Some((pending, _)) if *pending == config => {}
-                        _ => pending_config = Some((config, Instant::now())),
-                    }
-                }
-                let stable_config = match &pending_config {
-                    Some((config, since)) if since.elapsed() >= CONFIG_CHANGE_DEBOUNCE => {
-                        let status = daemon.driver_manager.lock().status();
-                        (status.sample_rate == config.sample_rate
-                            && status.buffer_frames == config.buffer_frames
-                            && status.channel_count == config.channel_count)
-                            .then_some(*config)
-                    }
-                    _ => None,
-                };
-                if let Some(config) = stable_config {
-                    pending_config = None;
+                let polled = daemon.driver_manager.lock().poll_config_change();
+                if let Some(config) = config_debouncer.observe(Instant::now(), polled) {
                     // Driver callbacks are intents handled by the same
                     // serialized control boundary as startup and IPC.
                     let _mutation = daemon.pipeline_mutation.lock();

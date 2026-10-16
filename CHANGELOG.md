@@ -6,6 +6,13 @@ release is recorded here.
 
 ## Unreleased
 
+- Fixed the remaining cold-start stall that required switching the audio
+  interface once or twice: the driver-config debounce waited for the
+  applied geometry to match the HAL's request before applying it, which
+  can never happen (the request is consumed once and the geometry only
+  changes after the reconfigure), so a 96 kHz startup request from
+  coreaudiod was dropped and the engine stayed at 48 kHz. Stability is
+  now judged by the request staying unchanged for the debounce window.
 - Plugin editor sheets no longer close while a slider is being dragged:
   graph refreshes that echo the editor's own mutation no longer rebuild
   the editor, and rack plugin instances keep their identity across
