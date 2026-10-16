@@ -60,6 +60,99 @@ struct PluginEditorView: View {
     }
 }
 
+/// Slider whose thumb stays visible in any appearance. The system slider
+/// knob is a near-white oval on a pale track, which all but disappears in
+/// light mode and in screenshots; this control draws a solid accent thumb
+/// with a white ring and shadow so position reads at a glance.
+struct HighContrastSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+
+    private var fraction: Double {
+        let span = range.upperBound - range.lowerBound
+        guard span > 0 else { return 0 }
+        return min(max((value - range.lowerBound) / span, 0), 1)
+    }
+
+    private var tickCount: Int? {
+        let span = range.upperBound - range.lowerBound
+        guard step > 0, span > 0 else { return nil }
+        let count = Int((span / step).rounded())
+        return (count >= 1 && count <= 100) ? count : nil
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let thumbDiameter: CGFloat = 18
+            let trackWidth = max(geometry.size.width - thumbDiameter, 1)
+            let thumbX = thumbDiameter / 2 + CGFloat(fraction) * trackWidth
+            ZStack(alignment: .leading) {
+                // Step ticks, like the system slider's.
+                if let tickCount {
+                    HStack(spacing: 0) {
+                        ForEach(0...tickCount, id: \.self) { _ in
+                            Rectangle()
+                                .fill(Color.secondary.opacity(0.45))
+                                .frame(width: 1, height: 7)
+                            if tickCount > 0 {
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, thumbDiameter / 2)
+                    .frame(height: 16)
+                }
+                Capsule()
+                    .fill(Color.secondary.opacity(0.30))
+                    .frame(height: 5)
+                    .padding(.horizontal, thumbDiameter / 2)
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: max(CGFloat(fraction) * trackWidth, 0), height: 5)
+                    .padding(.leading, thumbDiameter / 2)
+                Circle()
+                    .fill(Color.accentColor)
+                    .overlay(Circle().stroke(Color.white, lineWidth: 2))
+                    .shadow(color: .black.opacity(0.4), radius: 2, x: 0, y: 1)
+                    .frame(width: thumbDiameter, height: thumbDiameter)
+                    .position(x: thumbX, y: geometry.size.height / 2)
+            }
+            .frame(height: 22)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        let clampedX = min(max(drag.location.x - thumbDiameter / 2, 0), trackWidth)
+                        let raw = range.lowerBound
+                            + Double(clampedX / trackWidth) * (range.upperBound - range.lowerBound)
+                        setSnapped(raw)
+                    }
+            )
+        }
+        .frame(height: 22)
+        .accessibilityValue(Text(String(format: "%.2f", value)))
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: setSnapped(value + step)
+            case .decrement: setSnapped(value - step)
+            default: break
+            }
+        }
+    }
+
+    private func setSnapped(_ raw: Double) {
+        var next = min(max(raw, range.lowerBound), range.upperBound)
+        if step > 0 {
+            next = (next / step).rounded() * step
+            next = min(max(next, range.lowerBound), range.upperBound)
+        }
+        if next != value {
+            value = next
+        }
+    }
+}
+
 // MARK: - Gain Editor
 
 struct GainEditor: View {
@@ -1047,9 +1140,9 @@ struct DescriptorPluginEditor: View {
                         .frame(minWidth: 220)
 
                 default:
-                    Slider(
+                    HighContrastSlider(
                         value: doubleBinding(for: descriptor),
-                        in: (descriptor.min ?? -100.0)...(descriptor.max ?? 100.0),
+                        range: (descriptor.min ?? -100.0)...(descriptor.max ?? 100.0),
                         step: max(descriptor.step ?? 0.1, 0.0001)
                     )
                     Text("\(doubleValue(for: descriptor), specifier: "%.2f")\(descriptor.unit.isEmpty ? "" : " \(descriptor.unit)")")

@@ -170,6 +170,75 @@ public func isConfigBarVirtualDevice(_ name: String) -> Bool {
     }
 }
 
+/// Speaker-layout names offered by the upmixer/AAE `speaker_config` choice,
+/// in descriptor order (used when the parameter arrives as a choice index).
+public let configBarSpeakerConfigNames = [
+    "2.0", "5.0", "5.1", "7.1", "5.1.2", "5.1.4", "7.1.2", "7.1.4", "9.1.4", "9.1.6",
+]
+
+/// Physical channel count implied by an upmixer/AAE `speaker_config`
+/// parameter (layout string or choice index); nil when unrecognized.
+public func configBarSpeakerConfigChannels(_ raw: Any?) -> Int? {
+    let config: String?
+    if let string = raw as? String {
+        config = string
+    } else if let number = ConfigBarDelayParameters.doubleValue(raw) {
+        let index = Int(number)
+        config = configBarSpeakerConfigNames.indices.contains(index)
+            ? configBarSpeakerConfigNames[index]
+            : nil
+    } else {
+        config = nil
+    }
+
+    guard let config else { return nil }
+
+    switch config {
+    case "1.0": return 1
+    case "2.0": return 2
+    case "2.1": return 3
+    case "5.0": return 5
+    case "5.1": return 6
+    case "7.1", "5.1.2": return 8
+    case "5.1.4", "7.1.2": return 10
+    case "7.1.4": return 12
+    case "9.1.4": return 14
+    case "9.1.6": return 16
+    default: return nil
+    }
+}
+
+/// Deep equality for plugin-graph artifacts, used to tell a refresh that
+/// merely echoes the editor's own optimistic graph apart from an external
+/// change. NSNumber comparison makes 2 and 2.0 equal across the JSON seam.
+public func configBarGraphArtifactsEqual(_ lhs: [String: Any], _ rhs: [String: Any]) -> Bool {
+    (lhs as NSDictionary).isEqual(rhs)
+}
+
+/// Target applied output-channel count for the live chain, or nil to leave
+/// the current count alone. Raises toward the chain requirement (bounded
+/// by the device), and lowers back only a count that was itself raised
+/// automatically — a manual picker choice (`manuallyOwned`) is never
+/// overridden in either direction.
+public func configBarChainChannelTarget(
+    chainRequired: Int,
+    current: Int,
+    autoRaised: Int?,
+    manuallyOwned: Bool,
+    deviceLimit: Int?
+) -> Int? {
+    if !manuallyOwned,
+       let deviceLimit,
+       chainRequired > current,
+       chainRequired <= deviceLimit,
+       chainRequired <= 32 {
+        return chainRequired
+    }
+    guard autoRaised == current else { return nil }
+    let target = max(chainRequired, 2)
+    return target < current ? target : nil
+}
+
 public func sanitizeConfigBarPeaks(_ peaks: [Double], maxChannels: Int = 32) -> [Double] {
     let limit = min(max(maxChannels, 1), 32)
     return peaks.prefix(limit).map { peak in

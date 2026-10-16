@@ -4,6 +4,34 @@ Workspace (pkg) versions and the daemon crate version are independent: the
 installer is `0.7.x` while `sotf-daemon` is `0.1.x`. The mapping for each
 release is recorded here.
 
+## Unreleased
+
+- Plugin editor sheets no longer close while a slider is being dragged:
+  graph refreshes that echo the editor's own mutation no longer rebuild
+  the editor, and rack plugin instances keep their identity across
+  refreshes.
+- Generic plugin parameter sliders (e.g. Upmixer) use a high-contrast
+  thumb that stays visible in light and dark appearances.
+- Upmixer/AAE chain rows show the speaker-layout output count
+  (2 ch in → 10 ch out) instead of only the stereo input count; the
+  channel-compatibility warning now also covers graph nodes, and when
+  the selected interface can supply the channels a layout needs, the
+  applied output-channel count is raised to match automatically — and
+  lowered back when the wide plugin is removed, instead of leaving the
+  pipeline running wide on stereo content (which mis-sized the monitor
+  taps and distorted playback until a manual reset). Manual channel
+  choices are never overridden.
+- Outputs & DSP Profiles now stays in sync: the detail pane follows the
+  live route when the output is switched from anywhere, the interface name
+  in the detail header is a menu for switching interfaces, and virtual
+  devices (SotF Virtual Audio and other loopbacks) are no longer offered
+  as outputs, where they would create a feedback loop.
+- Restored the HAL Input, Audio Output, Outputs & DSP Profiles, and Security
+  sections of the configuration window, which were dropped accidentally in
+  0.7.15 (only the dead Audio Source selector was meant to be removed), and
+  widened the sample-rate segmented control so six daemon-reported rates no
+  longer overflow over their label.
+
 ## 0.7.15 (daemon 0.1.38)
 
 ### Cold start

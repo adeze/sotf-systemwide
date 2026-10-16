@@ -2176,6 +2176,13 @@ struct ConfigurationView: View {
     @State private var lastConfirmedOutputChannels: Int = 2
     @State private var channelMutationGeneration = 0
     @State private var channelMutationInFlight = false
+    /// Output-channel count last raised automatically for the live chain;
+    /// only such a count may be lowered automatically again.
+    @State private var autoRaisedOutputChannels: Int? = nil
+    /// True after the user picks an output-channel count manually; the
+    /// chain-requirement sync then leaves the count alone until the next
+    /// route switch.
+    @State private var outputChannelsManuallyOwned = false
 
     // Error handling
     @State private var showingError = false
@@ -2365,6 +2372,354 @@ struct ConfigurationView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     VStack(spacing: 20) {
 
+            GroupBox(label: Label("HAL Input (from macOS apps)", systemImage: "waveform.path")) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("The HAL driver captures audio from macOS applications")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    HStack {
+                        Text("Input Channels:")
+                            .font(.headline)
+
+                        Picker("", selection: $halInputChannels) {
+                            ForEach(channelOptions, id: \.self) { count in
+                                Text("\(count) channel\(count == 1 ? "" : "s")").tag(count)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
+                        .onChange(of: halInputChannels) { newValue in
+                            syncMeterArrays(inputChannels: newValue)
+                            if programmaticInputChannelSync {
+                                programmaticInputChannelSync = false
+                                return
+                            }
+                            applyHALConfiguration()
+                        }
+
+                        Spacer()
+
+                        HStack(spacing: 4) {
+                            Image(systemName: "info.circle")
+                                .foregroundColor(.blue)
+                            Text("Usually 2 for stereo")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding()
+            }
+
+            // Audio Output Section
+            GroupBox(label: Label("Audio Output (to speakers)", systemImage: "hifispeaker")) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Output Device:")
+                            .font(.headline)
+
+                        Picker("Device", selection: $selectedDevice) {
+                            if physicalOutputDevices.isEmpty {
+                                Text(outputDevicePlaceholderText).tag("")
+                            }
+
+                            ForEach(physicalOutputDevices, id: \.name) { device in
+                                HStack {
+                                    Text(device.name)
+                                    if device.is_default {
+                                        Text("(default)")
+                                            .foregroundColor(.secondary)
+                                            .font(.caption)
+                                    }
+                                    if let channels = device.channels, let sampleRate = device.sample_rate {
+                                        Text("- \(channels)ch @ \(sampleRate/1000)kHz")
+                                            .foregroundColor(.secondary)
+                                            .font(.caption)
+                                    }
+                                }
+                                .tag(device.name)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .onChange(of: selectedDevice) { newDevice in
+                            guard !newDevice.isEmpty else { return }
+                            if programmaticDeviceSelection == newDevice {
+                                programmaticDeviceSelection = nil
+                                syncOutputChannelsToSelectedDevice(applyChange: false)
+                                return
+                            }
+                            guard !isVirtualDevice(newDevice) else {
+                                errorMessage = "Virtual audio devices cannot be used as Systemwide speaker output. Select hardware speakers/headphones here, and select SotF Virtual Audio in macOS Sound Output."
+                                showingError = true
+                                loadDevices()
+                                return
+                            }
+                            // A manual route change takes control back from
+                            // any automatic failover state.
+                            autoRaisedOutputChannels = nil
+                            outputChannelsManuallyOwned = false
+                            routeAutoFailedOver = false
+                            preferredOutputDeviceName = nil
+                            preferredOutputDeviceUID = nil
+                            let previousDevice = lastConfirmedDevice ?? lastDaemonSelectedDevice
+                            let previousOutputChannels = lastConfirmedOutputChannels
+                            let requestedOutputChannels = min(
+                                max(halOutputChannels, 1),
+                                selectedOutputDeviceChannelLimit ?? 32
+                            )
+                            if halOutputChannels != requestedOutputChannels {
+                                programmaticOutputChannelSync = true
+                                halOutputChannels = requestedOutputChannels
+                                syncMeterArrays(outputChannels: requestedOutputChannels)
+                            }
+                            let statusGeneration = beginDaemonMutation()
+                            deviceMutationGeneration &+= 1
+                            let mutationGeneration = deviceMutationGeneration
+                            deviceMutationInFlight = true
+                            let fields: [String: Any] = [
+                                "output_device": newDevice,
+                                "output_channels": requestedOutputChannels,
+                            ]
+                            sendApplyConfiguration(fields) { response in
+                                guard mutationGeneration == deviceMutationGeneration,
+                                      acceptsStatusSnapshot(statusGeneration) else { return }
+                                deviceMutationInFlight = false
+                                adoptPipelineGeneration(from: response)
+                                if response?.success == true {
+                                    lastConfirmedDevice = newDevice
+                                    lastDaemonSelectedDevice = newDevice
+                                    lastConfirmedOutputChannels = requestedOutputChannels
+                                } else {
+                                    errorMessage = response?.error ?? "Failed to set output device: \(newDevice)"
+                                    showingError = true
+                                    if let previous = previousDevice {
+                                        programmaticDeviceSelection = previous
+                                        selectedDevice = previous
+                                    }
+                                    if halOutputChannels != previousOutputChannels {
+                                        programmaticOutputChannelSync = true
+                                        halOutputChannels = previousOutputChannels
+                                        syncMeterArrays(outputChannels: previousOutputChannels)
+                                    }
+                                    loadDevices()
+                                }
+                            }
+                        }
+
+                        Button(action: {
+                            loadDevices()
+                        }) {
+                            Image(systemName: loadingDevices ? "hourglass" : "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(loadingDevices)
+                        .help("Refresh output devices")
+                    }
+                    .onAppear {
+                        loadDevices()
+                    }
+
+                    Divider()
+
+                    HStack {
+                        Text("Output Channels:")
+                            .font(.headline)
+
+                        Picker("", selection: $halOutputChannels) {
+                            ForEach(outputChannelOptions, id: \.self) { count in
+                                Text("\(count) channel\(count == 1 ? "" : "s")").tag(count)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
+                        .onChange(of: halOutputChannels) { newValue in
+                            syncMeterArrays(outputChannels: min(max(newValue, 1), 32))
+                            if programmaticOutputChannelSync {
+                                programmaticOutputChannelSync = false
+                                return
+                            }
+                            // A manual choice owns the count again; the
+                            // chain-requirement sync must not touch it.
+                            autoRaisedOutputChannels = nil
+                            outputChannelsManuallyOwned = true
+                            applyHALConfiguration()
+                        }
+
+                        Spacer()
+
+                        HStack(spacing: 4) {
+                            Image(systemName: "info.circle")
+                                .foregroundColor(.blue)
+                            Text(outputChannelsHelpText)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Divider()
+
+                    HStack {
+                        Text("Volume:")
+                        Slider(value: $volume, in: 0...1)
+                            .onChange(of: volume) { newVolume in
+                                if programmaticVolumeSync {
+                                    programmaticVolumeSync = false
+                                    lastConfirmedVolume = newVolume
+                                    return
+                                }
+                                let statusGeneration = beginDaemonMutation()
+                                volumeMutationGeneration &+= 1
+                                let generation = volumeMutationGeneration
+                                let previousVolume = lastConfirmedVolume
+                                volumeUpdateWorkItem?.cancel()
+                                let work = DispatchWorkItem {
+                                    client.sendCommandAsync(["command": "set_volume", "volume": newVolume]) { response in
+                                        guard generation == volumeMutationGeneration,
+                                              acceptsStatusSnapshot(statusGeneration) else { return }
+                                        volumeUpdateWorkItem = nil
+                                        if response?.success != true {
+                                            errorMessage = response?.error ?? "Failed to set volume"
+                                            showingError = true
+                                            programmaticVolumeSync = true
+                                            volume = previousVolume
+                                        } else {
+                                            lastConfirmedVolume = newVolume
+                                        }
+                                    }
+                                }
+                                volumeUpdateWorkItem = work
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+                            }
+                        Text("\(Int(volume * 100))%")
+                            .frame(width: 50)
+                    }
+                }
+                .padding()
+            }
+
+            // Plugin Configuration Section
+            GroupBox(label: Label("Outputs & DSP Profiles", systemImage: "hifispeaker.2")) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Button {
+                            loadPluginConfig()
+                        } label: {
+                            if loadingPluginConfiguration {
+                                HStack(spacing: 6) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Loading…")
+                                }
+                            } else {
+                                Text("Load Configuration...")
+                            }
+                        }
+                        .disabled(loadingPluginConfiguration || savingPluginConfiguration)
+
+                        Button {
+                            savePluginConfig()
+                        } label: {
+                            if savingPluginConfiguration {
+                                HStack(spacing: 6) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Saving…")
+                                }
+                            } else {
+                                Text("Save Configuration...")
+                            }
+                        }
+                        .disabled(loadingPluginConfiguration || savingPluginConfiguration)
+
+                        Spacer()
+                    }
+
+                    Divider()
+
+                    OutputProfilesView(
+                        client: client,
+                        entries: outputRouteEntries,
+                        profiles: outputProfiles,
+                        outputChannels: halOutputChannels,
+                        availableOutputChannels: selectedOutputDeviceChannelLimit,
+                        onLiveOutputChannelsRequirement: { syncOutputChannelsToChainRequirement($0) },
+                        refreshTrigger: pluginRackRefreshToken,
+                        onSwitchRoute: { switchOutputRoute(to: $0, profileID: $1) },
+                        onAssignProfile: { assignProfile(to: $0, profileID: $1) },
+                        onSaveProfile: { saveOutputProfile($0, completion: $1) },
+                        onCreateProfile: { createOutputProfile(named: $0) },
+                        onRenameProfile: { renameOutputProfile(id: $0, name: $1) },
+                        onDeleteProfile: { deleteOutputProfile(id: $0) }
+                    )
+                }
+                .padding()
+            }
+
+            // Security Section
+            GroupBox(label: Label("Security", systemImage: "lock.shield")) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Toggle("Encrypt audio data", isOn: $encryptionEnabled)
+                            .onChange(of: encryptionEnabled) { newValue in
+                                if encryptionToggleGuard.consumeProgrammaticChange() {
+                                    return
+                                }
+                                setEncryption(enabled: newValue)
+                            }
+
+                        Spacer()
+
+                        // Status indicator
+                        HStack(spacing: 4) {
+                            Image(systemName: encryptionEnabled ? "lock.fill" : "lock.open")
+                                .foregroundColor(encryptionEnabled ? .green : .secondary)
+                            if !encryptionFingerprint.isEmpty {
+                                Text(encryptionFingerprint.prefix(8) + "...")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+
+                    Text("When enabled, audio data is encrypted in memory to prevent other users or processes from accessing it. Recommended for multi-user systems.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+
+                    // Error state (conditional)
+                    if let error = encryptionError {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.orange)
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
+                    }
+
+                    Divider()
+
+                    HStack {
+                        Button("Rotate Key") {
+                            rotateEncryptionKey()
+                        }
+                        .help("Generate a new encryption key")
+
+                        Spacer()
+
+                        Button("Refresh Status") {
+                            refreshEncryptionStatus()
+                        }
+                    }
+                }
+                .padding()
+            }
+            .onAppear {
+                refreshEncryptionStatus()
+            }
+
+
             // HAL Driver Configuration Section
             GroupBox(label: Label("HAL Driver Configuration", systemImage: "cpu")) {
                 VStack(alignment: .leading, spacing: 12) {
@@ -2410,7 +2765,9 @@ struct ConfigurationView: View {
                             }
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 250)
+                        // A fixed 250 pt squeezed six daemon-reported rates
+                        // until the control overflowed over its label.
+                        .frame(width: CGFloat(max(3, sampleRateOptions.count)) * 88)
                         .onChange(of: selectedSampleRate) { newRate in
                             if programmaticSampleRateSync {
                                 programmaticSampleRateSync = false
@@ -3133,7 +3490,10 @@ struct ConfigurationView: View {
     /// ones (their profile assignments survive unplug).
     private var outputRouteEntries: [OutputRouteEntry] {
         let knownIDs = Set(outputProfiles.map(\.id))
-        var entries: [OutputRouteEntry] = devices.map { device in
+        // Virtual devices (SotF Virtual Audio, loopback bridges) must never
+        // be offered as a route target: routing systemwide output into the
+        // virtual input it captures from would create a feedback loop.
+        var entries: [OutputRouteEntry] = devices.filter { !isVirtualDevice($0.name) }.map { device in
             let profileID = ConfigBarOutputProfiles.resolveProfileID(
                 assignments: profileAssignments,
                 uid: device.uid,
@@ -3172,6 +3532,10 @@ struct ConfigurationView: View {
             } else {
                 continue
             }
+            // Remembered virtual devices stay excluded for the same reason.
+            if isVirtualDevice(name) {
+                continue
+            }
             // Prefer the UID-keyed row when both keys exist for one device.
             if uid == nil,
                remembered.contains(where: { $0.name == name }) {
@@ -3198,6 +3562,8 @@ struct ConfigurationView: View {
 
     private func switchOutputRoute(to entry: OutputRouteEntry, profileID: String?) {
         guard entry.isPresent else { return }
+        autoRaisedOutputChannels = nil
+        outputChannelsManuallyOwned = false
         routeAutoFailedOver = false
         preferredOutputDeviceName = nil
         preferredOutputDeviceUID = nil
@@ -3383,6 +3749,31 @@ struct ConfigurationView: View {
         }
 
         syncOutputChannelsToSelectedDevice(applyChange: !selectedFromDaemon)
+    }
+
+    /// Keep the applied output-channel count in step with the live chain.
+    /// Raise it when the chain needs more (e.g. an upmixer set to 5.1.4
+    /// needs 10) and the selected interface can provide it, so the Audio
+    /// Output picker reflects the chain instead of sitting at the
+    /// 2-channel default. When the wide plugin is removed again, lower
+    /// back — but only a count this function itself raised: a manual
+    /// picker choice clears `autoRaisedOutputChannels` and is never
+    /// overridden. Leaving the raised count in place after removal kept
+    /// the pipeline running 16-wide on stereo content, which mis-sized
+    /// the monitor taps and distorted playback until a manual reset.
+    private func syncOutputChannelsToChainRequirement(_ chainRequired: Int) {
+        guard let target = configBarChainChannelTarget(
+            chainRequired: chainRequired,
+            current: halOutputChannels,
+            autoRaised: autoRaisedOutputChannels,
+            manuallyOwned: outputChannelsManuallyOwned,
+            deviceLimit: selectedOutputDeviceChannelLimit
+        ) else { return }
+        autoRaisedOutputChannels = target > halOutputChannels ? target : nil
+        programmaticOutputChannelSync = true
+        halOutputChannels = target
+        syncMeterArrays(outputChannels: target)
+        applyHALConfiguration()
     }
 
     private func syncOutputChannelsToSelectedDevice(applyChange: Bool) {

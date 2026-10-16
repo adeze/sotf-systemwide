@@ -16,6 +16,7 @@ struct OutputProfilesView: View {
     let profiles: [OutputProfileModel]
     let outputChannels: Int
     let availableOutputChannels: Int?
+    var onLiveOutputChannelsRequirement: ((Int) -> Void)? = nil
     let refreshTrigger: Int
     let onSwitchRoute: (OutputRouteEntry, String?) -> Void
     let onAssignProfile: (OutputRouteEntry, String) -> Void
@@ -34,6 +35,19 @@ struct OutputProfilesView: View {
             return match
         }
         return entries.first(where: { $0.isLiveRoute }) ?? entries.first
+    }
+
+    private var liveRouteID: String? {
+        entries.first(where: { $0.isLiveRoute })?.id
+    }
+
+    /// Header-menu pick: show the chosen output immediately, and route audio
+    /// to it when it is present and not already live.
+    private func switchToEntry(_ candidate: OutputRouteEntry) {
+        selectedID = candidate.id
+        if candidate.isPresent && !candidate.isLiveRoute {
+            onSwitchRoute(candidate, candidate.profileID)
+        }
     }
 
     private func profileName(for id: String?) -> String {
@@ -79,9 +93,11 @@ struct OutputProfilesView: View {
                 if let entry = selection {
                     ProfileDetailHeader(
                         entry: entry,
+                        entries: entries,
                         profiles: profiles,
                         onAssignProfile: { onAssignProfile(entry, $0) },
                         onSwitch: { onSwitchRoute(entry, entry.profileID) },
+                        onSwitchToEntry: { switchToEntry($0) },
                         onCreateProfile: {
                             newProfileName = "\(entry.name) DSP"
                             showingCreateProfile = true
@@ -97,7 +113,8 @@ struct OutputProfilesView: View {
                             client: client,
                             outputChannels: outputChannels,
                             availableOutputChannels: availableOutputChannels,
-                            refreshTrigger: refreshTrigger
+                            refreshTrigger: refreshTrigger,
+                            onOutputChannelsRequirementChange: onLiveOutputChannelsRequirement
                         )
                     } else if let profile = profiles.first(where: { $0.id == entry.profileID }) {
                         StoredProfileDetailView(
@@ -118,6 +135,14 @@ struct OutputProfilesView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // The detail pane follows the live route: switching output from the
+        // device picker, a Switch button, or a daemon failover must not
+        // leave the configuration view editing the previous interface.
+        .onChange(of: liveRouteID) { newLiveID in
+            if let newLiveID {
+                selectedID = newLiveID
+            }
         }
         .sheet(isPresented: $showingCreateProfile) {
             VStack(alignment: .leading, spacing: 12) {
@@ -214,9 +239,11 @@ struct OutputMasterRow: View {
 
 struct ProfileDetailHeader: View {
     let entry: OutputRouteEntry
+    let entries: [OutputRouteEntry]
     let profiles: [OutputProfileModel]
     let onAssignProfile: (String) -> Void
     let onSwitch: () -> Void
+    let onSwitchToEntry: (OutputRouteEntry) -> Void
     let onCreateProfile: () -> Void
     let onRenameProfile: (String, String) -> Void
     let onDeleteProfile: (String) -> Void
@@ -232,10 +259,35 @@ struct ProfileDetailHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text(entry.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                // The interface name is a menu: pick another interface to
+                // view it and, when present, route audio to it.
+                Menu {
+                    ForEach(entries) { candidate in
+                        Button {
+                            onSwitchToEntry(candidate)
+                        } label: {
+                            HStack {
+                                Text(candidate.name)
+                                if candidate.id == entry.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(entry.name)
+                            .font(.headline)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Image(systemName: "chevron.down")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Switch interface")
                 if entry.isLiveRoute {
                     Text("LIVE")
                         .font(.caption.weight(.bold))

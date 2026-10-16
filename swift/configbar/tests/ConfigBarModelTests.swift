@@ -879,4 +879,70 @@ final class ConfigBarModelTests: XCTestCase {
         ))
         XCTAssertTrue(ConfigBarDaemonWatchdog.shouldRestart(consecutiveFailures: 5))
     }
+
+    // MARK: - Speaker layout channels
+
+    func testSpeakerConfigChannelsFromLayoutStringAndIndex() {
+        XCTAssertEqual(configBarSpeakerConfigChannels("5.1"), 6)
+        XCTAssertEqual(configBarSpeakerConfigChannels("5.1.4"), 10)
+        XCTAssertEqual(configBarSpeakerConfigChannels("7.1.4"), 12)
+        // Choice index 2 is "5.1" in descriptor order.
+        XCTAssertEqual(configBarSpeakerConfigChannels(2), 6)
+        XCTAssertEqual(configBarSpeakerConfigChannels(2.0), 6)
+        XCTAssertNil(configBarSpeakerConfigChannels("bogus"))
+        XCTAssertNil(configBarSpeakerConfigChannels(99))
+        XCTAssertNil(configBarSpeakerConfigChannels(nil))
+    }
+
+    func testChainChannelTargetRaisesLowersAndRespectsManualChoice() {
+        // Upmixer 5.1.4 appears on a stereo-configured Fireface: raise.
+        XCTAssertEqual(
+            configBarChainChannelTarget(
+                chainRequired: 10, current: 2, autoRaised: nil,
+                manuallyOwned: false, deviceLimit: 94
+            ), 10
+        )
+        // The upmixer is removed again: lower back to stereo.
+        XCTAssertEqual(
+            configBarChainChannelTarget(
+                chainRequired: 2, current: 10, autoRaised: 10,
+                manuallyOwned: false, deviceLimit: 94
+            ), 2
+        )
+        // Device cannot supply the layout: no raise (warning path instead).
+        XCTAssertNil(
+            configBarChainChannelTarget(
+                chainRequired: 10, current: 2, autoRaised: nil,
+                manuallyOwned: false, deviceLimit: 2
+            )
+        )
+        // A manual picker choice is never overridden in either direction.
+        XCTAssertNil(
+            configBarChainChannelTarget(
+                chainRequired: 10, current: 2, autoRaised: nil,
+                manuallyOwned: true, deviceLimit: 94
+            )
+        )
+        XCTAssertNil(
+            configBarChainChannelTarget(
+                chainRequired: 2, current: 10, autoRaised: nil,
+                manuallyOwned: true, deviceLimit: 94
+            )
+        )
+        // A count the sync did not raise is never lowered automatically.
+        XCTAssertNil(
+            configBarChainChannelTarget(
+                chainRequired: 2, current: 10, autoRaised: nil,
+                manuallyOwned: false, deviceLimit: 94
+            )
+        )
+    }
+
+    func testGraphArtifactEqualityToleratesIntDoubleSeam() {
+        let lhs: [String: Any] = ["nodes": [["id": 1, "gain": 2] as [String: Any]]]
+        let rhs: [String: Any] = ["nodes": [["id": 1.0, "gain": 2.0] as [String: Any]]]
+        XCTAssertTrue(configBarGraphArtifactsEqual(lhs, rhs))
+        let different: [String: Any] = ["nodes": [["id": 2, "gain": 2] as [String: Any]]]
+        XCTAssertFalse(configBarGraphArtifactsEqual(lhs, different))
+    }
 }

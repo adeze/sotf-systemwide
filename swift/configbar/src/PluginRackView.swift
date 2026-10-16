@@ -11,6 +11,11 @@ struct PluginRackView: View {
     let outputChannels: Int
     let availableOutputChannels: Int?
     let refreshTrigger: Int
+    /// Live-route hosts keep the applied output-channel count in step with
+    /// the chain (e.g. an upmixer layout): raise it when the chain needs
+    /// more, lower it again when the wide plugin goes away. Receives the
+    /// chain-only requirement, excluding the currently applied count.
+    var onOutputChannelsRequirementChange: ((Int) -> Void)? = nil
 
     @State private var plugins: [PluginInstance] = []
     @State private var graph: PluginGraphModel? = nil
@@ -171,6 +176,12 @@ struct PluginRackView: View {
         .onChange(of: refreshTrigger) { _ in
             refreshPlugins()
         }
+        .onChange(of: chainRequiredOutputChannels) { _ in
+            onOutputChannelsRequirementChange?(chainRequiredOutputChannels)
+        }
+        .onChange(of: availableOutputChannels) { _ in
+            onOutputChannelsRequirementChange?(chainRequiredOutputChannels)
+        }
         .sheet(isPresented: $showingAddSheet) {
             AddPluginSheet(
                 availablePlugins: availablePlugins,
@@ -220,19 +231,54 @@ struct PluginRackView: View {
 
     // MARK: - Actions
 
+    /// Widest output requirement stated by the chain itself, from rack
+    /// plugins and graph nodes alike (graph mode may have an empty rack
+    /// list). Excludes the currently applied count so hosts can also lower
+    /// the applied count when a wide plugin is removed.
+    private var chainRequiredOutputChannels: Int {
+        var required = 0
+        required = max(
+            required,
+            plugins.map { requiredOutputChannels(for: $0, fallbackToOutput: false) }.max() ?? 0
+        )
+        if let graph {
+            required = max(
+                required,
+                graph.nodes.map { requiredOutputChannels(forNode: $0) }.max() ?? 0
+            )
+        }
+        return required
+    }
+
+    /// Widest output requirement in the chain, from rack plugins and graph
+    /// nodes alike (graph mode may have an empty rack list).
+    private var maxRequiredOutputChannels: Int {
+        var required = outputChannels
+        required = max(required, plugins.map { requiredOutputChannels(for: $0) }.max() ?? required)
+        if let graph {
+            required = max(required, graph.nodes.map { requiredOutputChannels(forNode: $0) }.max() ?? required)
+        }
+        return required
+    }
+
     private var channelCompatibilityWarning: String? {
         guard let availableOutputChannels, availableOutputChannels > 0 else {
             return nil
         }
 
-        let required = max(outputChannels, plugins.map { requiredOutputChannels(for: $0) }.max() ?? outputChannels)
+        let required = maxRequiredOutputChannels
         guard required > availableOutputChannels else {
             return nil
         }
 
-        let limitingPlugins = plugins
+        var limitingPlugins = plugins
             .filter { requiredOutputChannels(for: $0) > availableOutputChannels }
             .map { $0.pluginName }
+        if let graph {
+            limitingPlugins += graph.nodes
+                .filter { requiredOutputChannels(forNode: $0) > availableOutputChannels }
+                .map { $0.pluginName }
+        }
 
         let subject = limitingPlugins.isEmpty
             ? "The plugin chain"
@@ -242,7 +288,10 @@ struct PluginRackView: View {
         return "\(subject)\(suffix) wants \(required) output channels, but the selected output device exposes \(availableOutputChannels). Choose a higher-channel interface or reduce the plugin output layout."
     }
 
-    private func requiredOutputChannels(for plugin: PluginInstance) -> Int {
+    private func requiredOutputChannels(
+        for plugin: PluginInstance,
+        fallbackToOutput: Bool = true
+    ) -> Int {
         let params = plugin.parameters
 
         if let channels = intValue(params["output_channels"]) ?? intValue(params["physical_output_channels"]) {
@@ -261,7 +310,7 @@ struct PluginRackView: View {
             return channels
         }
 
-        return outputChannels
+        return fallbackToOutput ? outputChannels : plugin.inputChannels
     }
 
     private func intValue(_ raw: Any?) -> Int? {
@@ -281,31 +330,21 @@ struct PluginRackView: View {
     }
 
     private func speakerConfigChannels(_ raw: Any?) -> Int? {
-        let config: String?
-        if let string = raw as? String {
-            config = string
-        } else if let index = intValue(raw) {
-            let choices = ["2.0", "5.0", "5.1", "7.1", "5.1.2", "5.1.4", "7.1.2", "7.1.4", "9.1.4", "9.1.6"]
-            config = choices.indices.contains(index) ? choices[index] : nil
-        } else {
-            config = nil
-        }
+        configBarSpeakerConfigChannels(raw)
+    }
 
-        guard let config else { return nil }
-
-        switch config {
-        case "1.0": return 1
-        case "2.0": return 2
-        case "2.1": return 3
-        case "5.0": return 5
-        case "5.1": return 6
-        case "7.1", "5.1.2": return 8
-        case "5.1.4", "7.1.2": return 10
-        case "7.1.4": return 12
-        case "9.1.4": return 14
-        case "9.1.6": return 16
-        default: return nil
+    /// Effective output-channel requirement of one graph node; an upmixer
+    /// expands to its speaker layout even though its input stays stereo.
+    private func requiredOutputChannels(forNode node: PluginGraphNodeModel) -> Int {
+        if node.pluginType == "upmixer" || node.pluginType == "aae",
+           let channels = speakerConfigChannels(node.parameters["speaker_config"]) {
+            return channels
         }
+        if let channels = intValue(node.parameters["output_channels"])
+            ?? intValue(node.parameters["physical_output_channels"]) {
+            return channels
+        }
+        return node.inputChannels
     }
 
     private func refreshPlugins(preserveError: Bool = false) {
@@ -323,19 +362,43 @@ struct PluginRackView: View {
 
             DispatchQueue.main.async {
                 if let result = result {
+                    // Only an externally changed graph may rebuild the
+                    // editor (graphRevision feeds its .id). A refresh that
+                    // echoes our own optimistic mutation must leave the
+                    // editor — and any open edit sheet — untouched, or the
+                    // sheet closes mid-drag on the first live apply.
+                    if !configBarGraphArtifactsEqual(
+                        graph?.artifact ?? [:],
+                        result.graph?.artifact ?? [:]
+                    ) {
+                        graphRevision += 1
+                    }
                     graph = result.graph
                     graphGeneration = result.generation
-                    graphRevision += 1
+                    // Preserve instance identity across refreshes: rebuilding
+                    // PluginInstance objects mints fresh UUIDs, which orphan
+                    // the edit sheet's editingPluginID and blank it.
+                    let previous = plugins
                     plugins = result.plugins.enumerated().map { index, dict in
                         let type_ = dict["plugin_type"] as? String ?? "unknown"
                         let params = dict["parameters"] as? [String: Any] ?? [:]
+                        let channels = max(1, dict["input_channels"] as? Int ?? 1)
+                        let bypassed = dict["bypassed"] as? Bool ?? false
+                        if let existing = previous.first(where: {
+                            $0.index == index && $0.pluginType == type_
+                        }) {
+                            existing.parameters = params
+                            existing.inputChannels = channels
+                            existing.bypassed = bypassed
+                            return existing
+                        }
                         return PluginInstance(
                             index: index,
                             pluginType: type_,
                             pluginName: pluginDisplayName(type_),
                             parameters: params,
-                            inputChannels: max(1, dict["input_channels"] as? Int ?? 1),
-                            bypassed: dict["bypassed"] as? Bool ?? false
+                            inputChannels: channels,
+                            bypassed: bypassed
                         )
                     }
                 } else {
@@ -560,6 +623,18 @@ struct PluginRackView: View {
     }
 }
 
+/// Row subtitle for a graph node. Channel-expanding plugins (upmixer, AAE)
+/// report their speaker-layout output count, which follows the layout picked
+/// in the editor instead of the stereo input count.
+func nodeChannelSummary(_ node: PluginGraphNodeModel) -> String {
+    if node.pluginType == "upmixer" || node.pluginType == "aae",
+       let output = configBarSpeakerConfigChannels(node.parameters["speaker_config"]),
+       output != node.inputChannels {
+        return "Node \(node.id) · \(node.inputChannels) ch in → \(output) ch out"
+    }
+    return "Node \(node.id) · \(node.inputChannels) ch"
+}
+
 // MARK: - Plugin Graph Editor
 
 struct LinearGraphRackEditorView: View {
@@ -612,7 +687,7 @@ struct LinearGraphRackEditorView: View {
                             .foregroundColor(.secondary)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(node.pluginName).font(.body.weight(.medium))
-                            Text("Node \(node.id) · \(node.inputChannels) ch")
+                            Text(nodeChannelSummary(node))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -816,7 +891,7 @@ struct PluginGraphEditorView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(node.pluginName).font(.body.weight(.medium))
-                                Text("Node \(node.id)")
+                                Text(nodeChannelSummary(node))
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                                 if node.bypassed {
