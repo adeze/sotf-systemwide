@@ -1932,13 +1932,44 @@ impl SystemwideController {
         let fallback = effective.fallback;
         let mut plan = plan;
         plan.spec.output_device = effective.device;
+
+        // The HAL/driver request rate can outlive the interface it was set
+        // for: sample rates change between devices and even on one device
+        // (Audio MIDI Setup, another host's session). Verify the resolved
+        // output device actually supports the requested rate before the
+        // engine opens a stream at a rate the hardware clock will not run.
+        let mut driver_sample_rate = driver_sample_rate;
+        let mut negotiated_rate: Option<u32> = None;
+        if let Some(device_name) = plan.spec.output_device.as_deref() {
+            let lab_backend = self.driver_manager.lock().is_lab_backend();
+            match self.device_registry.lock().negotiate_sample_rate(
+                device_name,
+                driver_sample_rate,
+                lab_backend,
+            ) {
+                Ok(rate) if rate != driver_sample_rate => {
+                    log::warn!(
+                        "Output device '{device_name}' does not support {driver_sample_rate} Hz; using {rate} Hz",
+                    );
+                    negotiated_rate = Some(rate);
+                    driver_sample_rate = rate;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("Sample-rate check skipped: {error}");
+                }
+            }
+        }
         // Fast path: the requested plan is already running on a healthy
         // engine. Acknowledge without teardown: no mute ramp, no stop/start,
         // no callback wait, no audible gap, and no generation bump to
         // invalidate other clients' base tokens. The parameter hot path
         // (handle_update_plugin) and structural changes never reach here as
         // no-ops; anything unhealthy falls through to the cold path.
-        if !force_driver_config && self.pipeline_plan_already_applied(&plan) {
+        if !force_driver_config
+            && negotiated_rate.is_none()
+            && self.pipeline_plan_already_applied(&plan)
+        {
             let generation = self.system_state.lock().generation();
             log::info!("Pipeline plan identical to applied pipeline; skipping restart");
             return Response::ok(serde_json::json!({ "generation": generation }));
@@ -1957,6 +1988,7 @@ impl SystemwideController {
         let current_driver_status = self.driver_manager.lock().status();
         if current_driver_status.driver_installed
             && (force_driver_config
+                || negotiated_rate.is_some()
                 || current_driver_status.channel_count != plan.spec.input_channels as u32)
         {
             let result = self.driver_manager.lock().request_config(DriverConfig::new(
