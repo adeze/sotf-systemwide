@@ -173,13 +173,13 @@ struct PluginRackView: View {
             loadAvailablePlugins()
             refreshPlugins()
         }
-        .onChange(of: refreshTrigger) { _ in
+        .onChange(of: refreshTrigger) { _, _ in
             refreshPlugins()
         }
-        .onChange(of: chainRequiredOutputChannels) { _ in
+        .onChange(of: chainRequiredOutputChannels) { _, _ in
             onOutputChannelsRequirementChange?(chainRequiredOutputChannels)
         }
-        .onChange(of: availableOutputChannels) { _ in
+        .onChange(of: availableOutputChannels) { _, _ in
             onOutputChannelsRequirementChange?(chainRequiredOutputChannels)
         }
         .sheet(isPresented: $showingAddSheet) {
@@ -1760,7 +1760,7 @@ struct AddPluginSheet: View {
         .onAppear {
             selectInitialPluginIfNeeded()
         }
-        .onChange(of: availablePlugins.count) { _ in
+        .onChange(of: availablePlugins.count) { _, _ in
             selectInitialPluginIfNeeded()
         }
         .onMoveCommand { direction in

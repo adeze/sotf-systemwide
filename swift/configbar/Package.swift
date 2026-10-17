@@ -30,6 +30,7 @@ let package = Package(
             exclude: [
                 "ConfigBar.swift",
                 "AppMain.swift",
+                "OutputProfilesView.swift",
                 "PluginEditorViews.swift",
                 "PluginRackView.swift",
             ],

@@ -7,11 +7,6 @@ import ViewInspector
 @testable import ConfigBarModels
 @testable import ConfigBarUI
 
-extension ConfigurationView: Inspectable {}
-extension OutputProfilesView: Inspectable {}
-extension ProfileDetailHeader: Inspectable {}
-extension OutputMasterRow: Inspectable {}
-
 final class ConfigBarUITests: XCTestCase {
     private func makeUnixServer(path: String) throws -> Int32 {
         unlink(path)
@@ -347,7 +342,7 @@ final class ConfigBarUITests: XCTestCase {
             healthy.fulfill()
         }
         wait(for: [healthy], timeout: 3.0)
-        server.wait(timeout: .now() + 2)
+        _ = server.wait(timeout: .now() + 2)
 
         // The daemon dies: listener closed, socket file removed.
         Darwin.close(serverFD)
@@ -363,49 +358,17 @@ final class ConfigBarUITests: XCTestCase {
     }
 }
 
-// MARK: - Hosted-view regression tests
-//
-// These tests instantiate real SwiftUI views in an NSHostingView and assert
-// on the accessibility tree (labels, identifiers, frames). They cover the
-// class of bug the pure-model suites cannot see: sections dropped from the
-// configuration window, controls overflowing their labels, and the outputs
-// detail pane drifting out of sync with the live route. Daemon traffic goes
-// to a fixture Unix-socket server through the SOTF_DAEMON_SOCKET_PATH seam.
 
-@MainActor
-final class ConfigBarHostedViewTests: XCTestCase {
+/// Scripted Unix-socket daemon for hosted-view tests. Deliberately not
+/// actor-isolated: it owns its listener thread and lock-protected state so
+/// tests stay free of MainActor/Sendable friction.
+final class FixtureDaemonServer: @unchecked Sendable {
     private var serverFD: Int32 = -1
-    private var socketPath = ""
-    private var oldSocketPath: String?
-    private var serverThread: Thread?
-    private let serverLock = NSLock()
-    private var serverRunning = false
+    private let lock = NSLock()
+    private var running = false
+    private var acceptThread: Thread?
 
-    override func setUp() {
-        super.setUp()
-        socketPath = "/tmp/sotf-configbar-hosted-\(getpid())-\(UInt32.random(in: 0..<UInt32.max)).sock"
-        startFixtureDaemon(at: socketPath)
-        oldSocketPath = getenv("SOTF_DAEMON_SOCKET_PATH").map { String(cString: $0) }
-        setenv("SOTF_DAEMON_SOCKET_PATH", socketPath, 1)
-        setenv("SOTF_DAEMON_PATH", "/bin/false", 1)
-    }
-
-    override func tearDown() {
-        AudioEngineClient.resetPollingConnectionForTests()
-        if let oldSocketPath { setenv("SOTF_DAEMON_SOCKET_PATH", oldSocketPath, 1) }
-        else { unsetenv("SOTF_DAEMON_SOCKET_PATH") }
-        unsetenv("SOTF_DAEMON_PATH")
-        serverLock.lock()
-        serverRunning = false
-        serverLock.unlock()
-        if serverFD >= 0 { Darwin.close(serverFD) }
-        unlink(socketPath)
-        super.tearDown()
-    }
-
-    // MARK: Fixture daemon
-
-    private func startFixtureDaemon(at path: String) {
+    init(path: String) {
         unlink(path)
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -420,23 +383,32 @@ final class ConfigBarHostedViewTests: XCTestCase {
         }
         XCTAssertEqual(bound, 0, "fixture daemon bind failed")
         XCTAssertEqual(Darwin.listen(serverFD, 8), 0)
-        serverLock.lock()
-        serverRunning = true
-        serverLock.unlock()
-        let thread = Thread { [weak self] in
-            guard let self else { return }
+        lock.lock()
+        running = true
+        lock.unlock()
+        let thread = Thread { [self] in
             while true {
-                self.serverLock.lock()
-                let running = self.serverRunning
-                self.serverLock.unlock()
-                guard running else { return }
-                let clientFD = Darwin.accept(self.serverFD, nil, nil)
+                lock.lock()
+                let isRunning = running
+                lock.unlock()
+                guard isRunning else { return }
+                let clientFD = Darwin.accept(serverFD, nil, nil)
                 guard clientFD >= 0 else { return }
-                Thread.detachNewThread { self.serve(clientFD) }
+                Thread.detachNewThread { [self] in serve(clientFD) }
             }
         }
         thread.start()
-        serverThread = thread
+        acceptThread = thread
+    }
+
+    func stop() {
+        lock.lock()
+        running = false
+        lock.unlock()
+        if serverFD >= 0 {
+            Darwin.close(serverFD)
+            serverFD = -1
+        }
     }
 
     private func serve(_ clientFD: Int32) {
@@ -477,6 +449,42 @@ final class ConfigBarHostedViewTests: XCTestCase {
         body.withCString { cString in
             _ = Darwin.send(fd, cString, strlen(cString), 0)
         }
+    }
+}
+
+// MARK: - Hosted-view regression tests
+//
+// These tests instantiate real SwiftUI views in an NSHostingView and assert
+// on the accessibility tree (labels, identifiers, frames). They cover the
+// class of bug the pure-model suites cannot see: sections dropped from the
+// configuration window, controls overflowing their labels, and the outputs
+// detail pane drifting out of sync with the live route. Daemon traffic goes
+// to a fixture Unix-socket server through the SOTF_DAEMON_SOCKET_PATH seam.
+
+@MainActor
+final class ConfigBarHostedViewTests: XCTestCase {
+    private var fixtureServer: FixtureDaemonServer?
+    private var socketPath = ""
+    private var oldSocketPath: String?
+
+    override func setUp() {
+        super.setUp()
+        socketPath = "/tmp/sotf-configbar-hosted-\(getpid())-\(UInt32.random(in: 0..<UInt32.max)).sock"
+        fixtureServer = FixtureDaemonServer(path: socketPath)
+        oldSocketPath = getenv("SOTF_DAEMON_SOCKET_PATH").map { String(cString: $0) }
+        setenv("SOTF_DAEMON_SOCKET_PATH", socketPath, 1)
+        setenv("SOTF_DAEMON_PATH", "/bin/false", 1)
+    }
+
+    override func tearDown() {
+        AudioEngineClient.resetPollingConnectionForTests()
+        if let oldSocketPath { setenv("SOTF_DAEMON_SOCKET_PATH", oldSocketPath, 1) }
+        else { unsetenv("SOTF_DAEMON_SOCKET_PATH") }
+        unsetenv("SOTF_DAEMON_PATH")
+        fixtureServer?.stop()
+        fixtureServer = nil
+        unlink(socketPath)
+        super.tearDown()
     }
 
     // MARK: Inspection helpers
@@ -588,7 +596,7 @@ final class ConfigBarHostedViewTests: XCTestCase {
     }
 }
 
-extension ConfigBarHostedViewTests.EntriesHarness: Inspectable {}
+
 
 // MARK: - Snapshot rendering tests
 //

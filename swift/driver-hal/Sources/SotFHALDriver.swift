@@ -342,7 +342,7 @@ final class DriverState {
     }
 
     func startMaintenanceTasks() {
-        maintenanceQueue.async {
+        maintenanceQueue.async { [self] in
             if self.maintenanceTimer != nil {
                 return
             }

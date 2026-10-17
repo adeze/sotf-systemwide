@@ -83,7 +83,20 @@ systemwide-lab:
 
 [group('lint')]
 lint:
+	#!/usr/bin/env bash
+	set -euo pipefail
 	{{cargo}} clippy --workspace --all-targets --no-deps -- -D warnings
+	if [[ "$(uname -s)" == "Darwin" ]]; then
+		scripts/lint-swift.sh
+	fi
+
+# Swift warning gate on its own (also run as part of `lint` on macOS):
+# compiler warnings-as-errors over ConfigBar and the HAL driver, since
+# SwiftLint is not in the toolchain.
+[group('lint')]
+[macos]
+lint-swift:
+	scripts/lint-swift.sh
 
 # ----------------------------------------------------------------------
 # QA (same target name as sotf: lint + tests + the isolated macOS lab)

@@ -167,7 +167,7 @@ struct GainEditor: View {
                 Text("Gain:")
                     .frame(width: 80, alignment: .trailing)
                 Slider(value: $gainDb, in: -60...20, step: 0.1)
-                    .onChange(of: gainDb) { newValue in
+                    .onChange(of: gainDb) { _, newValue in
                         onUpdate(["gain_db": newValue])
                     }
                 Text("\(gainDb, specifier: "%.1f") dB")
@@ -222,7 +222,7 @@ struct DelayEditor: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 300)
-                .onChange(of: perChannel) { _ in applyModeChange() }
+                .onChange(of: perChannel) { _, _ in applyModeChange() }
             }
 
             if perChannel {
@@ -339,7 +339,7 @@ struct DelayEditor: View {
             )
             seedScalars(from: parameters)
         }
-        .onChange(of: channelCount) { _ in
+        .onChange(of: channelCount) { _, _ in
             channelMs = ConfigBarDelayParameters.channelDelays(
                 draftParameters,
                 channelCount: safeChannelCount
@@ -467,7 +467,7 @@ struct DelayEditor: View {
                     .frame(width: 150, alignment: .trailing)
                     .font(.caption)
                 Slider(value: value, in: range, step: step)
-                    .onChange(of: value.wrappedValue) { _ in emitScalars() }
+                    .onChange(of: value.wrappedValue) { _, _ in emitScalars() }
                 Text("\(value.wrappedValue * scale, specifier: format)\(unit)")
                     .frame(width: 100, alignment: .trailing)
                     .monospacedDigit()
@@ -492,7 +492,7 @@ struct DelayEditor: View {
                     .font(.caption)
                 Toggle("", isOn: value)
                     .labelsHidden()
-                    .onChange(of: value.wrappedValue) { _ in emitScalars() }
+                    .onChange(of: value.wrappedValue) { _, _ in emitScalars() }
             }
             Text(doc)
                 .font(.caption2)
@@ -542,7 +542,7 @@ struct EQEditor: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 300)
-                .onChange(of: perChannel) { _ in applyModeChange() }
+                .onChange(of: perChannel) { _, _ in applyModeChange() }
             }
 
             if perChannel {
@@ -606,7 +606,7 @@ struct EQEditor: View {
                 channelCount: safeChannelCount
             )
         }
-        .onChange(of: channelCount) { _ in
+        .onChange(of: channelCount) { _, _ in
             channelFilters = ConfigBarEQParameters.channelFilters(
                 draftParameters,
                 channelCount: safeChannelCount
@@ -740,22 +740,22 @@ struct EQBandRow: View {
                 }
             }
             .frame(width: 90)
-            .onChange(of: filterType) { _ in emitUpdate() }
+            .onChange(of: filterType) { _, _ in emitUpdate() }
 
             Text("Hz:")
             TextField("", value: $frequency, format: .number)
                 .frame(width: 60)
-                .onChange(of: frequency) { _ in emitUpdate() }
+                .onChange(of: frequency) { _, _ in emitUpdate() }
 
             Text("Q:")
             TextField("", value: $q, format: .number)
                 .frame(width: 45)
-                .onChange(of: q) { _ in emitUpdate() }
+                .onChange(of: q) { _, _ in emitUpdate() }
 
             Text("dB:")
             TextField("", value: $gainDb, format: .number)
                 .frame(width: 50)
-                .onChange(of: gainDb) { _ in emitUpdate() }
+                .onChange(of: gainDb) { _, _ in emitUpdate() }
 
             Button(action: onRemove) {
                 Image(systemName: "minus.circle")
@@ -853,7 +853,7 @@ struct CompressorEditor: View {
             Text(label)
                 .frame(width: 80, alignment: .trailing)
             Slider(value: value, in: range)
-                .onChange(of: value.wrappedValue) { _ in emitUpdate() }
+                .onChange(of: value.wrappedValue) { _, _ in emitUpdate() }
             Text("\(value.wrappedValue, specifier: "%.1f") \(unit)")
                 .frame(width: 80, alignment: .trailing)
                 .monospacedDigit()
@@ -897,7 +897,7 @@ struct LimiterEditor: View {
             Text(label)
                 .frame(width: 80, alignment: .trailing)
             Slider(value: value, in: range)
-                .onChange(of: value.wrappedValue) { _ in emitUpdate() }
+                .onChange(of: value.wrappedValue) { _, _ in emitUpdate() }
             Text("\(value.wrappedValue, specifier: "%.1f") \(unit)")
                 .frame(width: 80, alignment: .trailing)
                 .monospacedDigit()
@@ -949,7 +949,7 @@ struct GateEditor: View {
             Text(label)
                 .frame(width: 80, alignment: .trailing)
             Slider(value: value, in: range)
-                .onChange(of: value.wrappedValue) { _ in emitUpdate() }
+                .onChange(of: value.wrappedValue) { _, _ in emitUpdate() }
             Text("\(value.wrappedValue, specifier: "%.1f") \(unit)")
                 .frame(width: 80, alignment: .trailing)
                 .monospacedDigit()

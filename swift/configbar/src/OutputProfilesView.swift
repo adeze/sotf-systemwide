@@ -139,7 +139,7 @@ struct OutputProfilesView: View {
         // The detail pane follows the live route: switching output from the
         // device picker, a Switch button, or a daemon failover must not
         // leave the configuration view editing the previous interface.
-        .onChange(of: liveRouteID) { newLiveID in
+        .onChange(of: liveRouteID) { _, newLiveID in
             if let newLiveID {
                 selectedID = newLiveID
             }

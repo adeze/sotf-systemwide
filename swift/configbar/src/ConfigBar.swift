@@ -2389,7 +2389,7 @@ struct ConfigurationView: View {
                         }
                         .pickerStyle(.menu)
                         .frame(width: 150)
-                        .onChange(of: halInputChannels) { newValue in
+                        .onChange(of: halInputChannels) { _, newValue in
                             syncMeterArrays(inputChannels: newValue)
                             if programmaticInputChannelSync {
                                 programmaticInputChannelSync = false
@@ -2443,7 +2443,7 @@ struct ConfigurationView: View {
                         }
                         .pickerStyle(.menu)
                         .accessibilityIdentifier("audio.outputDevicePicker")
-                        .onChange(of: selectedDevice) { newDevice in
+                        .onChange(of: selectedDevice) { _, newDevice in
                             guard !newDevice.isEmpty else { return }
                             if programmaticDeviceSelection == newDevice {
                                 programmaticDeviceSelection = nil
@@ -2535,7 +2535,7 @@ struct ConfigurationView: View {
                         .pickerStyle(.menu)
                         .frame(width: 150)
                         .accessibilityIdentifier("audio.outputChannelsPicker")
-                        .onChange(of: halOutputChannels) { newValue in
+                        .onChange(of: halOutputChannels) { _, newValue in
                             syncMeterArrays(outputChannels: min(max(newValue, 1), 32))
                             if programmaticOutputChannelSync {
                                 programmaticOutputChannelSync = false
@@ -2564,7 +2564,7 @@ struct ConfigurationView: View {
                     HStack {
                         Text("Volume:")
                         Slider(value: $volume, in: 0...1)
-                            .onChange(of: volume) { newVolume in
+                            .onChange(of: volume) { _, newVolume in
                                 if programmaticVolumeSync {
                                     programmaticVolumeSync = false
                                     lastConfirmedVolume = newVolume
@@ -2663,7 +2663,7 @@ struct ConfigurationView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Toggle("Encrypt audio data", isOn: $encryptionEnabled)
-                            .onChange(of: encryptionEnabled) { newValue in
+                            .onChange(of: encryptionEnabled) { _, newValue in
                                 if encryptionToggleGuard.consumeProgrammaticChange() {
                                     return
                                 }
@@ -2772,7 +2772,7 @@ struct ConfigurationView: View {
                         // until the control overflowed over its label.
                         .frame(width: CGFloat(max(3, sampleRateOptions.count)) * 88)
                         .accessibilityIdentifier("hal.sampleRatePicker")
-                        .onChange(of: selectedSampleRate) { newRate in
+                        .onChange(of: selectedSampleRate) { _, newRate in
                             if programmaticSampleRateSync {
                                 programmaticSampleRateSync = false
                                 return
@@ -2806,7 +2806,7 @@ struct ConfigurationView: View {
                         }
                         .pickerStyle(.menu)
                         .frame(width: 150)
-                        .onChange(of: selectedBufferFrames) { newFrames in
+                        .onChange(of: selectedBufferFrames) { _, newFrames in
                             if programmaticBufferFramesSync {
                                 programmaticBufferFramesSync = false
                                 return
