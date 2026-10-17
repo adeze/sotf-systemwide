@@ -6,6 +6,17 @@ release is recorded here.
 
 ## Unreleased
 
+- Startup now verifies the output interface supports the configured
+  sample rate (it can differ between devices and change on one device):
+  the daemon negotiates to a device-supported rate instead of opening a
+  stream whose clock the hardware will not run, which played at the
+  wrong speed until the interface was re-selected.
+- ConfigBar gains an automated UI test stack: `just test-configbar`
+  (real XCTest execution with zero-discovery guard, wired into the macOS
+  gate), ViewInspector hosted-view regression tests over a fixture
+  daemon socket, image snapshot tests, and `just test-configbar-e2e`
+  (lab daemon + real menu-bar binary smoke).
+
 - Fixed the remaining cold-start stall that required switching the audio
   interface once or twice: the driver-config debounce waited for the
   applied geometry to match the HAL's request before applying it, which

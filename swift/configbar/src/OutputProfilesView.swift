@@ -287,6 +287,7 @@ struct ProfileDetailHeader: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .accessibilityIdentifier("outputDetail.switchMenu")
                 .help("Switch interface")
                 if entry.isLiveRoute {
                     Text("LIVE")

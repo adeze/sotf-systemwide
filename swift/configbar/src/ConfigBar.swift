@@ -2442,6 +2442,7 @@ struct ConfigurationView: View {
                             }
                         }
                         .pickerStyle(.menu)
+                        .accessibilityIdentifier("audio.outputDevicePicker")
                         .onChange(of: selectedDevice) { newDevice in
                             guard !newDevice.isEmpty else { return }
                             if programmaticDeviceSelection == newDevice {
@@ -2533,6 +2534,7 @@ struct ConfigurationView: View {
                         }
                         .pickerStyle(.menu)
                         .frame(width: 150)
+                        .accessibilityIdentifier("audio.outputChannelsPicker")
                         .onChange(of: halOutputChannels) { newValue in
                             syncMeterArrays(outputChannels: min(max(newValue, 1), 32))
                             if programmaticOutputChannelSync {
@@ -2758,6 +2760,7 @@ struct ConfigurationView: View {
                     HStack {
                         Text("Sample Rate:")
                             .frame(width: 100, alignment: .leading)
+                            .accessibilityIdentifier("hal.sampleRateLabel")
 
                         Picker("", selection: $selectedSampleRate) {
                             ForEach(sampleRateOptions, id: \.self) { rate in
@@ -2768,6 +2771,7 @@ struct ConfigurationView: View {
                         // A fixed 250 pt squeezed six daemon-reported rates
                         // until the control overflowed over its label.
                         .frame(width: CGFloat(max(3, sampleRateOptions.count)) * 88)
+                        .accessibilityIdentifier("hal.sampleRatePicker")
                         .onChange(of: selectedSampleRate) { newRate in
                             if programmaticSampleRateSync {
                                 programmaticSampleRateSync = false

@@ -20,6 +20,9 @@ let package = Package(
             targets: ["SotFSystemwide"]
         ),
     ],
+    dependencies: [
+        .package(url: "https://github.com/nalexn/ViewInspector", from: "0.10.0")
+    ],
     targets: [
         .target(
             name: "ConfigBarModels",
@@ -58,14 +61,14 @@ let package = Package(
             name: "ConfigBarModelTests",
             dependencies: ["ConfigBarModels"],
             path: "tests",
-            exclude: ["ConfigBarUITests.swift"],
+            exclude: ["ConfigBarUITests.swift", "__Snapshots__"],
             sources: ["ConfigBarModelTests.swift", "ConfigBarIPCTests.swift"]
         ),
         .testTarget(
             name: "ConfigBarUITests",
-            dependencies: ["ConfigBarUI", "ConfigBarModels"],
+            dependencies: ["ConfigBarUI", "ConfigBarModels", "ViewInspector"],
             path: "tests",
-            exclude: ["ConfigBarModelTests.swift", "ConfigBarIPCTests.swift"],
+            exclude: ["ConfigBarModelTests.swift", "ConfigBarIPCTests.swift", "__Snapshots__"],
             sources: ["ConfigBarUITests.swift"]
         ),
     ]

@@ -83,6 +83,9 @@ test_macos() {
         --scratch-path "$swift_build_dir" \
         --target SotFSystemwide
 
+    phase "ConfigBar XCTest suites"
+    scripts/test-configbar.sh "$swift_build_dir"
+
     local hal_sources="swift/driver-hal/Sources"
     phase "Swift HAL driver type-check"
     swiftc \

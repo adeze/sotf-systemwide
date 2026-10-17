@@ -1145,6 +1145,7 @@ struct DescriptorPluginEditor: View {
                         range: (descriptor.min ?? -100.0)...(descriptor.max ?? 100.0),
                         step: max(descriptor.step ?? 0.1, 0.0001)
                     )
+                    .accessibilityIdentifier("pluginParam.\(descriptor.key)")
                     Text("\(doubleValue(for: descriptor), specifier: "%.2f")\(descriptor.unit.isEmpty ? "" : " \(descriptor.unit)")")
                         .frame(width: 100, alignment: .trailing)
                         .monospacedDigit()

@@ -27,6 +27,21 @@ check:
 test:
 	{{cargo}} test --workspace --all-targets
 
+# Run the Swift ConfigBar XCTest suites. `swift test` silently discovers
+# zero XCTest cases on current toolchains, so this executes the bundles via
+# xctest and fails when discovery regresses to zero.
+[group('test')]
+[macos]
+test-configbar:
+	scripts/test-configbar.sh
+
+# Process-level E2E smoke: lab daemon + real ConfigBar binary over IPC.
+# Manual/nightly tier; needs a logged-in GUI session for the menu-bar app.
+[group('test')]
+[macos]
+test-configbar-e2e:
+	scripts/test-configbar-e2e.sh
+
 # Run the isolated macOS systemwide-audio lab. This does not install or touch
 # the CoreAudio HAL bundle; subprocess tests use temporary Unix sockets and
 # the deterministic lab driver.
@@ -43,7 +58,7 @@ systemwide-lab:
 	{{cargo}} test -p sotf-daemon --features hal --test ipc_line_tests -- --test-threads=1
 	{{cargo}} test --manifest-path ../sotf-daw/Cargo.toml -p driver-hal --lib
 	{{cargo}} test -p sotf-daemon --test hal_driver_contract_tests
-	swift test --package-path swift/configbar --scratch-path target/configbar-swiftpm
+	scripts/test-configbar.sh target/configbar-swiftpm
 
 # Run the isolated Linux systemwide-audio lab: same subprocess coverage as
 # the macOS lab, minus the HAL and Swift steps. `driver-hal` is macOS-only
