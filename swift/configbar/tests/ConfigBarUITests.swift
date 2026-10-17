@@ -264,6 +264,103 @@ final class ConfigBarUITests: XCTestCase {
         lock.unlock()
         XCTAssertEqual(count, 1)
     }
+
+    /// UI-before-daemon start order: status polling must report unreachable
+    /// (fast, without hanging) while no socket exists, then adopt the
+    /// daemon once its socket appears.
+    func testPollStatusAdoptsDaemonThatStartsAfterTheUI() throws {
+        let path = "/tmp/sotf-configbar-late-daemon-\(getpid()).sock"
+        unlink(path)
+        let oldSocketPath = getenv("SOTF_DAEMON_SOCKET_PATH").map { String(cString: $0) }
+        setenv("SOTF_DAEMON_SOCKET_PATH", path, 1)
+        defer {
+            AudioEngineClient.resetPollingConnectionForTests()
+            if let oldSocketPath { setenv("SOTF_DAEMON_SOCKET_PATH", oldSocketPath, 1) }
+            else { unsetenv("SOTF_DAEMON_SOCKET_PATH") }
+            unlink(path)
+        }
+        AudioEngineClient.resetPollingConnectionForTests()
+
+        let unreachable = expectation(description: "absent daemon polls unreachable")
+        AudioEngineClient.pollStatus { _, reachable in
+            XCTAssertFalse(reachable)
+            unreachable.fulfill()
+        }
+        wait(for: [unreachable], timeout: 3.0)
+
+        let serverFD = try makeUnixServer(path: path)
+        defer { Darwin.close(serverFD) }
+        let server = DispatchWorkItem {
+            let clientFD = Darwin.accept(serverFD, nil, nil)
+            guard clientFD >= 0 else { return }
+            defer { Darwin.close(clientFD) }
+            while self.readLine(from: clientFD) != nil {
+                self.sendLine(
+                    "{\"success\":true,\"data\":{\"schema_version\":1,\"generation\":8,\"desired\":{\"input_channels\":2,\"output_channels\":2},\"applied\":{\"generation\":7},\"observed\":{\"engine\":{\"state\":\"Idle\",\"volume\":1.0,\"muted\":false}}},\"error\":null}\n",
+                    on: clientFD
+                )
+            }
+        }
+        DispatchQueue.global(qos: .utility).async(execute: server)
+
+        AudioEngineClient.resetPollingConnectionForTests()
+        let adopted = expectation(description: "late daemon polls reachable")
+        AudioEngineClient.pollStatus { status, reachable in
+            XCTAssertTrue(reachable)
+            XCTAssertEqual(status.generation, 8)
+            adopted.fulfill()
+        }
+        wait(for: [adopted], timeout: 3.0)
+    }
+
+    /// Daemon-dies-mid-session start order: after a healthy poll, the
+    /// socket vanishing must flip polling to unreachable, not hang or crash.
+    func testPollStatusSurvivesDaemonDisappearingMidSession() throws {
+        let path = "/tmp/sotf-configbar-dying-daemon-\(getpid()).sock"
+        unlink(path)
+        let oldSocketPath = getenv("SOTF_DAEMON_SOCKET_PATH").map { String(cString: $0) }
+        setenv("SOTF_DAEMON_SOCKET_PATH", path, 1)
+        defer {
+            AudioEngineClient.resetPollingConnectionForTests()
+            if let oldSocketPath { setenv("SOTF_DAEMON_SOCKET_PATH", oldSocketPath, 1) }
+            else { unsetenv("SOTF_DAEMON_SOCKET_PATH") }
+            unlink(path)
+        }
+
+        let serverFD = try makeUnixServer(path: path)
+        let server = DispatchWorkItem {
+            let clientFD = Darwin.accept(serverFD, nil, nil)
+            guard clientFD >= 0 else { return }
+            _ = self.readLine(from: clientFD)
+            self.sendLine(
+                "{\"success\":true,\"data\":{\"schema_version\":1,\"generation\":8,\"desired\":{\"input_channels\":2,\"output_channels\":2},\"applied\":{\"generation\":7},\"observed\":{\"engine\":{\"state\":\"Idle\",\"volume\":1.0,\"muted\":false}}},\"error\":null}\n",
+                on: clientFD
+            )
+            Darwin.close(clientFD)
+        }
+        DispatchQueue.global(qos: .utility).async(execute: server)
+
+        AudioEngineClient.resetPollingConnectionForTests()
+        let healthy = expectation(description: "daemon polls healthy")
+        AudioEngineClient.pollStatus { _, reachable in
+            XCTAssertTrue(reachable)
+            healthy.fulfill()
+        }
+        wait(for: [healthy], timeout: 3.0)
+        server.wait(timeout: .now() + 2)
+
+        // The daemon dies: listener closed, socket file removed.
+        Darwin.close(serverFD)
+        unlink(path)
+        AudioEngineClient.resetPollingConnectionForTests()
+
+        let gone = expectation(description: "dead daemon polls unreachable")
+        AudioEngineClient.pollStatus { _, reachable in
+            XCTAssertFalse(reachable)
+            gone.fulfill()
+        }
+        wait(for: [gone], timeout: 5.0)
+    }
 }
 
 // MARK: - Hosted-view regression tests

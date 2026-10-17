@@ -5206,6 +5206,7 @@ dependencies = [
  "ndarray",
  "notify",
  "num-complex",
+ "rayon",
  "realfft",
  "rtrb",
  "rusqlite",

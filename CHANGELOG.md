@@ -6,6 +6,13 @@ release is recorded here.
 
 ## Unreleased
 
+- Added an exhaustive startup combination matrix (exchange-file state ×
+  crypto-key state × daemon/HAL start order, plus config-negotiation
+  round-trips) in driver-hal, and UI-before-daemon / daemon-dies polling
+  tests in ConfigBar. The matrix exposed and fixed one wedge: a legacy
+  loose-permission exchange file made every daemon start fail; the
+  create path now repairs the mode to 0600 (readers still fail closed).
+
 - Startup now verifies the output interface supports the configured
   sample rate (it can differ between devices and change on one device):
   the daemon negotiates to a device-supported rate instead of opening a
