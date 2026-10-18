@@ -32,6 +32,8 @@ mod configured;
 mod consts;
 #[path = "sotf_daemon/default.rs"]
 mod default;
+#[path = "sotf_daemon/device_listener.rs"]
+mod device_listener;
 #[path = "sotf_daemon/device_registry.rs"]
 mod device_registry;
 #[path = "sotf_daemon/loudness.rs"]

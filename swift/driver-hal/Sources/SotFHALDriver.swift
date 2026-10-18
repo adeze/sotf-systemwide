@@ -51,13 +51,39 @@ private func scopeName(_ scope: UInt32) -> String {
     }
 }
 
+// MARK: - Volume Conversion
+
+/// Bottom of the advertised decibel range. The daemon applies the scalar
+/// as linear gain, so the dB mapping is the honest gain curve
+/// (20*log10(scalar)) floored at this value instead of a perceptual taper.
+let kVolumeMinDecibels: Float32 = -48.0
+
+func clampVolumeScalar(_ scalar: Float32) -> Float32 {
+    guard scalar.isFinite else { return 1.0 }
+    return min(1.0, max(0.0, scalar))
+}
+
+func volumeScalarToDecibels(_ scalar: Float32) -> Float32 {
+    let clamped = clampVolumeScalar(scalar)
+    guard clamped > 0 else { return kVolumeMinDecibels }
+    return max(kVolumeMinDecibels, 20.0 * log10f(clamped))
+}
+
+func volumeDecibelsToScalar(_ decibels: Float32) -> Float32 {
+    guard decibels.isFinite else { return 1.0 }
+    let clamped = min(0.0, max(kVolumeMinDecibels, decibels))
+    if clamped <= kVolumeMinDecibels { return 0.0 }
+    return powf(10.0, clamped / 20.0)
+}
+
 // MARK: - Object IDs
 
 private let kPlugInObjectID: AudioObjectID = 1
 private let kDeviceObjectID: AudioObjectID = 2
 private let kInputStreamObjectID: AudioObjectID = 3
 private let kOutputStreamObjectID: AudioObjectID = 4
-// Future: kVolumeControlObjectID: AudioObjectID = 5
+private let kVolumeControlObjectID: AudioObjectID = 5
+private let kMuteControlObjectID: AudioObjectID = 6
 
 // MARK: - Property Selectors (FourCC codes)
 
@@ -112,6 +138,24 @@ private let kSelector_StreamConfig: UInt32        = 0x736C6179  // 'slay'
 private let kSelector_ConfigApp: UInt32           = 0x63617070  // 'capp'
 private let kSelector_DeviceCanBeDefault: UInt32  = 0x64666C74  // 'dflt' (same as CanBeDefault)
 
+// Device volume properties (implemented via the volume/mute controls)
+private let kSelector_VolumeScalar: UInt32        = 0x766F6C6D  // 'volm'
+private let kSelector_VolumeDecibels: UInt32      = 0x766F6C64  // 'vold'
+private let kSelector_VolumeRangeDecibels: UInt32 = 0x76646223  // 'vdb#'
+private let kSelector_VolumeScalarToDecibels: UInt32 = 0x76326462  // 'v2db'
+private let kSelector_VolumeDecibelsToScalar: UInt32 = 0x64623276  // 'db2v'
+private let kSelector_Mute: UInt32                = 0x6D757465  // 'mute'
+
+// Control properties
+private let kSelector_ControlScope: UInt32        = 0x63736370  // 'cscp'
+private let kSelector_ControlElement: UInt32      = 0x63656C6D  // 'celm'
+private let kSelector_LevelScalarValue: UInt32    = 0x6C637376  // 'lcsv'
+private let kSelector_LevelDecibelValue: UInt32   = 0x6C636476  // 'lcdv'
+private let kSelector_LevelDecibelRange: UInt32   = 0x6C636472  // 'lcdr'
+private let kSelector_LevelScalarToDecibels: UInt32 = 0x6C637364  // 'lcsd'
+private let kSelector_LevelDecibelsToScalar: UInt32 = 0x6C636473  // 'lcds'
+private let kSelector_BooleanValue: UInt32        = 0x6263766C  // 'bcvl'
+
 // Stream properties
 private let kSelector_StreamIsActive: UInt32      = 0x73616374  // 'sact'
 private let kSelector_StreamDirection: UInt32     = 0x73646972  // 'sdir'
@@ -128,6 +172,11 @@ private let kClassID_PlugIn: UInt32               = 0x61706C67  // 'aplg'
 private let kClassID_Device: UInt32               = 0x61646576  // 'adev'
 private let kClassID_Stream: UInt32               = 0x61737472  // 'astr'
 private let kClassID_Control: UInt32              = 0x6163746C  // 'actl'
+private let kClassID_LevelControl: UInt32         = 0x6C65766C  // 'levl'
+private let kClassID_VolumeControl: UInt32        = 0x766C6D65  // 'vlme'
+private let kClassID_BooleanControl: UInt32       = 0x746F676C  // 'togl'
+private let kClassID_MuteControl: UInt32          = 0x6D757465  // 'mute'
+private let kClassID_Wildcard: UInt32             = 0x2A2A2A2A  // '****'
 
 // Transport types
 private let kTransport_Virtual: UInt32            = 0x76697274  // 'virt'
@@ -310,6 +359,84 @@ final class DriverState {
     private let objectLifecycleLock = NSLock()
     private var deviceObjectCreated = false
     private var observedStreamObjects = Set<AudioObjectID>()
+    private var observedControlObjects = Set<AudioObjectID>()
+
+    // Output volume/mute advertised through the HAL controls. The shared
+    // header is the transport to the daemon; this lock-guarded copy is what
+    // CoreAudio property reads observe. `_publishedVolumeGeneration` is the
+    // last shared-header generation this process wrote or adopted, so the
+    // maintenance tick can tell daemon-originated changes from its own.
+    private let volumeLock = NSLock()
+    private var _volumeScalar: Float32 = 1.0
+    private var _outputMuted = false
+    private var _publishedVolumeGeneration: UInt32 = 0
+
+    func outputVolume() -> (scalar: Float32, muted: Bool) {
+        volumeLock.lock()
+        defer { volumeLock.unlock() }
+        return (_volumeScalar, _outputMuted)
+    }
+
+    /// Commit a HAL-originated volume change (media keys, sliders, Audio
+    /// MIDI): update local state, publish to the daemon through shared
+    /// memory, and notify CoreAudio listeners.
+    func commitOutputVolume(scalar: Float32? = nil, muted: Bool? = nil) {
+        volumeLock.lock()
+        if let scalar { _volumeScalar = clampVolumeScalar(scalar) }
+        if let muted { _outputMuted = muted }
+        let current = (_volumeScalar, _outputMuted)
+        volumeLock.unlock()
+
+        let lease = acquireSharedAudioForCallback()
+        let generation = lease.buffer.setOutputVolume(
+            scalarBits: current.0.bitPattern,
+            muted: current.1
+        )
+        finishSharedAudioCallback(slot: lease.slot)
+
+        if generation != 0 {
+            volumeLock.lock()
+            _publishedVolumeGeneration = generation
+            volumeLock.unlock()
+        }
+        notifyVolumePropertiesChanged()
+        halLog("[VOLUME] scalar=\(current.0) muted=\(current.1) generation=\(generation)")
+    }
+
+    /// Adopt a daemon-published volume from shared memory. Called from the
+    /// maintenance tick and once at initialize; notifies CoreAudio when the
+    /// local state actually changed so the OSD and sliders track IPC
+    /// `set_volume` changes.
+    func syncVolumeFromSharedMemory() {
+        let lease = acquireSharedAudioForCallback()
+        let shared = lease.buffer.outputVolume()
+        finishSharedAudioCallback(slot: lease.slot)
+
+        guard shared.generation != 0 else { return }
+        volumeLock.lock()
+        let changed = shared.generation != _publishedVolumeGeneration
+        if changed {
+            _volumeScalar = clampVolumeScalar(Float32(bitPattern: shared.scalarBits))
+            _outputMuted = shared.muted
+            _publishedVolumeGeneration = shared.generation
+        }
+        let current = (_volumeScalar, _outputMuted)
+        volumeLock.unlock()
+
+        if changed {
+            notifyVolumePropertiesChanged()
+            halLog("[VOLUME] adopted daemon volume scalar=\(current.0) muted=\(current.1) generation=\(shared.generation)")
+        }
+    }
+
+    private func notifyVolumePropertiesChanged() {
+        notifyPropertyChanged(objectID: kDeviceObjectID, selector: kSelector_VolumeScalar, scope: kScope_Output)
+        notifyPropertyChanged(objectID: kDeviceObjectID, selector: kSelector_VolumeDecibels, scope: kScope_Output)
+        notifyPropertyChanged(objectID: kDeviceObjectID, selector: kSelector_Mute, scope: kScope_Output)
+        notifyPropertyChanged(objectID: kVolumeControlObjectID, selector: kSelector_LevelScalarValue)
+        notifyPropertyChanged(objectID: kVolumeControlObjectID, selector: kSelector_LevelDecibelValue)
+        notifyPropertyChanged(objectID: kMuteControlObjectID, selector: kSelector_BooleanValue)
+    }
 
     /// Attempt to re-initialise shared memory if we're not connected.
     /// Throttled to one call per second. Safe to call from any thread.
@@ -414,6 +541,7 @@ final class DriverState {
             publishPendingHostConfigurationIfNeeded()
             handleHostConfigAcknowledgementIfNeeded()
             handleDaemonConfigRequestIfNeeded()
+            syncVolumeFromSharedMemory()
         }
     }
 
@@ -726,6 +854,7 @@ final class DriverState {
         objectLifecycleLock.lock()
         deviceObjectCreated = false
         observedStreamObjects.removeAll()
+        observedControlObjects.removeAll()
         objectLifecycleLock.unlock()
         isDisposed = false
     }
@@ -735,6 +864,7 @@ final class DriverState {
         objectLifecycleLock.lock()
         deviceObjectCreated = true
         observedStreamObjects.removeAll()
+        observedControlObjects.removeAll()
         objectLifecycleLock.unlock()
         isDisposed = false
     }
@@ -744,18 +874,28 @@ final class DriverState {
         objectLifecycleLock.lock()
         deviceObjectCreated = false
         observedStreamObjects.removeAll()
+        observedControlObjects.removeAll()
         objectLifecycleLock.unlock()
         isDisposed = true
     }
 
     func noteObjectAccess(_ objectID: AudioObjectID) {
-        guard objectID == kOutputStreamObjectID || objectID == kInputStreamObjectID else { return }
-
-        objectLifecycleLock.lock()
-        if deviceObjectCreated {
-            observedStreamObjects.insert(objectID)
+        switch objectID {
+        case kOutputStreamObjectID, kInputStreamObjectID:
+            objectLifecycleLock.lock()
+            if deviceObjectCreated {
+                observedStreamObjects.insert(objectID)
+            }
+            objectLifecycleLock.unlock()
+        case kVolumeControlObjectID, kMuteControlObjectID:
+            objectLifecycleLock.lock()
+            if deviceObjectCreated {
+                observedControlObjects.insert(objectID)
+            }
+            objectLifecycleLock.unlock()
+        default:
+            return
         }
-        objectLifecycleLock.unlock()
     }
 
     func canNotifyPropertyChange(objectID: AudioObjectID) -> Bool {
@@ -769,6 +909,8 @@ final class DriverState {
             return host != nil && deviceObjectCreated
         case kInputStreamObjectID, kOutputStreamObjectID:
             return host != nil && deviceObjectCreated && observedStreamObjects.contains(objectID)
+        case kVolumeControlObjectID, kMuteControlObjectID:
+            return host != nil && deviceObjectCreated && observedControlObjects.contains(objectID)
         default:
             return false
         }
@@ -835,12 +977,50 @@ private func getObjectType(_ objectID: AudioObjectID) -> String {
     case kDeviceObjectID: return "device"
     case kInputStreamObjectID: return "input_stream"
     case kOutputStreamObjectID: return "output_stream"
+    case kVolumeControlObjectID: return "volume_control"
+    case kMuteControlObjectID: return "mute_control"
     default: return "unknown(\(objectID))"
     }
 }
 
 private func scopeMatches(_ queryScope: UInt32, _ targetScope: UInt32) -> Bool {
     return queryScope == kScope_Wildcard || queryScope == targetScope || queryScope == kScope_Global
+}
+
+/// The class filter of an 'ownd' query: the qualifier data holds an
+/// AudioClassID, or 0 here when the caller asked for every owned object.
+private func qualifierClassID(size: UInt32, data: UnsafeRawPointer?) -> UInt32 {
+    guard size >= UInt32(MemoryLayout<UInt32>.size), let data else { return 0 }
+    return data.load(as: UInt32.self)
+}
+
+/// Owned objects matching a scope and class filter. A filter matches when
+/// it is absent/wildcard or appears in the object's class ancestry, which
+/// is how coreaudiod discovers the volume control among the device's
+/// owned objects (asking for 'actl' or 'levl', not our concrete 'vlme').
+private func ownedObjects(for objectID: AudioObjectID, scope: UInt32, qualifierClass: UInt32) -> [AudioObjectID] {
+    func matches(_ ancestry: [UInt32]) -> Bool {
+        qualifierClass == 0 || qualifierClass == kClassID_Wildcard || ancestry.contains(qualifierClass)
+    }
+    switch objectID {
+    case kPlugInObjectID:
+        return matches([kClassID_Device, kClassID_Object]) ? [kDeviceObjectID] : []
+    case kDeviceObjectID:
+        guard scopeMatches(scope, kScope_Output) else { return [] }
+        var result: [AudioObjectID] = []
+        if matches([kClassID_Stream, kClassID_Object]) {
+            result.append(kOutputStreamObjectID)
+        }
+        if matches([kClassID_VolumeControl, kClassID_LevelControl, kClassID_Control, kClassID_Object]) {
+            result.append(kVolumeControlObjectID)
+        }
+        if matches([kClassID_MuteControl, kClassID_BooleanControl, kClassID_Control, kClassID_Object]) {
+            result.append(kMuteControlObjectID)
+        }
+        return result
+    default:
+        return []
+    }
 }
 
 // MARK: - Driver Callbacks
@@ -867,6 +1047,7 @@ private func driverInitialize(
     if success {
         halLog("Shared memory initialized successfully")
         halLog("SharedMemory state after init: \(state.sharedAudio.connectionStateDebug)")
+        state.syncVolumeFromSharedMemory()
     } else {
         halLog("ERROR: Shared memory init failed, using loopback mode only")
     }
@@ -969,7 +1150,9 @@ private func driverHasProperty(_ driver: AudioServerPlugInDriverRef, _ objectID:
             kSelector_IsHidden, kSelector_PreferredStereo, kSelector_PreferredLayout,
             kSelector_ZeroTimePeriod, kSelector_ClockAlgorithm, kSelector_ClockIsStable,
             kSelector_BufferFrameSize, kSelector_BufferSizeRange, kSelector_StreamConfig,
-            kSelector_ControlList, kSelector_ConfigApp, kSelector_Identify
+            kSelector_ControlList, kSelector_ConfigApp, kSelector_Identify,
+            kSelector_VolumeScalar, kSelector_VolumeDecibels, kSelector_VolumeRangeDecibels,
+            kSelector_VolumeScalarToDecibels, kSelector_VolumeDecibelsToScalar, kSelector_Mute
         ]
         result = commonProps.contains(sel) || deviceProps.contains(sel)
 
@@ -980,6 +1163,21 @@ private func driverHasProperty(_ driver: AudioServerPlugInDriverRef, _ objectID:
             kSelector_AvailableVirtualFmts, kSelector_PhysicalFormat, kSelector_AvailablePhysicalFmts
         ]
         result = commonProps.contains(sel) || streamProps.contains(sel)
+
+    case kVolumeControlObjectID:
+        let volumeProps: Set<UInt32> = [
+            kSelector_ControlScope, kSelector_ControlElement,
+            kSelector_LevelScalarValue, kSelector_LevelDecibelValue,
+            kSelector_LevelDecibelRange, kSelector_LevelScalarToDecibels,
+            kSelector_LevelDecibelsToScalar
+        ]
+        result = commonProps.contains(sel) || volumeProps.contains(sel)
+
+    case kMuteControlObjectID:
+        let muteProps: Set<UInt32> = [
+            kSelector_ControlScope, kSelector_ControlElement, kSelector_BooleanValue
+        ]
+        result = commonProps.contains(sel) || muteProps.contains(sel)
 
     default:
         result = false
@@ -1001,7 +1199,13 @@ private func driverIsPropertySettable(_ driver: AudioServerPlugInDriverRef, _ ob
         kSelector_NominalSampleRate,
         kSelector_BufferFrameSize,
         kSelector_VirtualFormat,
-        kSelector_PhysicalFormat
+        kSelector_PhysicalFormat,
+        kSelector_VolumeScalar,
+        kSelector_VolumeDecibels,
+        kSelector_Mute,
+        kSelector_LevelScalarValue,
+        kSelector_LevelDecibelValue,
+        kSelector_BooleanValue
     ]
 
     let settable = settableProps.contains(sel)
@@ -1027,7 +1231,8 @@ private func driverGetPropertyDataSize(_ driver: AudioServerPlugInDriverRef, _ o
         kSelector_SafetyOffset, kSelector_IsHidden, kSelector_BufferFrameSize,
         kSelector_ZeroTimePeriod, kSelector_ClockAlgorithm, kSelector_ClockIsStable,
         kSelector_StreamIsActive, kSelector_StreamDirection, kSelector_TerminalType,
-        kSelector_StartingChannel, kSelector_Identify
+        kSelector_StartingChannel, kSelector_Identify, kSelector_Mute,
+        kSelector_BooleanValue, kSelector_ControlScope, kSelector_ControlElement
     ]
 
     if uint32Props.contains(sel) {
@@ -1038,6 +1243,18 @@ private func driverGetPropertyDataSize(_ driver: AudioServerPlugInDriverRef, _ o
     // Float64 properties
     if sel == kSelector_NominalSampleRate {
         outDataSize.pointee = UInt32(MemoryLayout<Float64>.size)
+        return noErr
+    }
+
+    // Float32 properties (volume values and conversions)
+    let float32Props: Set<UInt32> = [
+        kSelector_VolumeScalar, kSelector_VolumeDecibels,
+        kSelector_VolumeScalarToDecibels, kSelector_VolumeDecibelsToScalar,
+        kSelector_LevelScalarValue, kSelector_LevelDecibelValue,
+        kSelector_LevelScalarToDecibels, kSelector_LevelDecibelsToScalar
+    ]
+    if float32Props.contains(sel) {
+        outDataSize.pointee = UInt32(MemoryLayout<Float32>.size)
         return noErr
     }
 
@@ -1062,14 +1279,12 @@ private func driverGetPropertyDataSize(_ driver: AudioServerPlugInDriverRef, _ o
         outDataSize.pointee = UInt32(MemoryLayout<AudioObjectID>.size)  // 1 device
 
     case kSelector_OwnedObjects:
-        switch objectID {
-        case kPlugInObjectID:
-            outDataSize.pointee = UInt32(MemoryLayout<AudioObjectID>.size)  // 1 device
-        case kDeviceObjectID:
-            outDataSize.pointee = UInt32(MemoryLayout<AudioObjectID>.size)  // 1 stream (output)
-        default:
-            outDataSize.pointee = 0
-        }
+        let owned = ownedObjects(
+            for: objectID,
+            scope: scope,
+            qualifierClass: qualifierClassID(size: qualifierDataSize, data: qualifierData)
+        )
+        outDataSize.pointee = UInt32(MemoryLayout<AudioObjectID>.size * owned.count)
 
     case kSelector_Streams:
         if scope == kScope_Input {
@@ -1096,7 +1311,15 @@ private func driverGetPropertyDataSize(_ driver: AudioServerPlugInDriverRef, _ o
     case kSelector_StreamConfig:
         outDataSize.pointee = UInt32(MemoryLayout<AudioBufferList>.size)
 
-    case kSelector_ControlList, kSelector_CustomPropertyInfo, kSelector_BoxList, kSelector_TranslateUID:
+    case kSelector_VolumeRangeDecibels, kSelector_LevelDecibelRange:
+        outDataSize.pointee = UInt32(MemoryLayout<AudioValueRange>.size)
+
+    case kSelector_ControlList:
+        outDataSize.pointee = objectID == kDeviceObjectID
+            ? UInt32(MemoryLayout<AudioObjectID>.size * 2)
+            : 0
+
+    case kSelector_CustomPropertyInfo, kSelector_BoxList, kSelector_TranslateUID:
         outDataSize.pointee = 0
 
     case kSelector_PreferredStereo:
@@ -1133,7 +1356,13 @@ private func driverGetPropertyData(_ driver: AudioServerPlugInDriverRef, _ objec
     switch sel {
     // Class IDs
     case kSelector_BaseClass:
-        outData.storeBytes(of: kClassID_Object, as: UInt32.self)
+        let baseClassID: UInt32
+        switch objectID {
+        case kVolumeControlObjectID: baseClassID = kClassID_LevelControl
+        case kMuteControlObjectID: baseClassID = kClassID_BooleanControl
+        default: baseClassID = kClassID_Object
+        }
+        outData.storeBytes(of: baseClassID, as: UInt32.self)
         outDataSize.pointee = 4
 
     case kSelector_Class:
@@ -1142,6 +1371,8 @@ private func driverGetPropertyData(_ driver: AudioServerPlugInDriverRef, _ objec
         case kPlugInObjectID: classID = kClassID_PlugIn
         case kDeviceObjectID: classID = kClassID_Device
         case kInputStreamObjectID, kOutputStreamObjectID: classID = kClassID_Stream
+        case kVolumeControlObjectID: classID = kClassID_VolumeControl
+        case kMuteControlObjectID: classID = kClassID_MuteControl
         default: classID = kClassID_Object
         }
         outData.storeBytes(of: classID, as: UInt32.self)
@@ -1153,6 +1384,7 @@ private func driverGetPropertyData(_ driver: AudioServerPlugInDriverRef, _ objec
         case kPlugInObjectID: owner = kAudioObjectUnknown
         case kDeviceObjectID: owner = kPlugInObjectID
         case kInputStreamObjectID, kOutputStreamObjectID: owner = kDeviceObjectID
+        case kVolumeControlObjectID, kMuteControlObjectID: owner = kDeviceObjectID
         default: owner = kAudioObjectUnknown
         }
         outData.storeBytes(of: owner, as: AudioObjectID.self)
@@ -1165,6 +1397,8 @@ private func driverGetPropertyData(_ driver: AudioServerPlugInDriverRef, _ objec
         case kDeviceObjectID: name = "SotF Virtual Audio"
         case kInputStreamObjectID: name = "SotF Input"
         case kOutputStreamObjectID: name = "SotF Output"
+        case kVolumeControlObjectID: name = "SotF Volume"
+        case kMuteControlObjectID: name = "SotF Mute"
         default: name = "SotF HAL"
         }
         let cfStr = createCFString(name)
@@ -1213,16 +1447,16 @@ private func driverGetPropertyData(_ driver: AudioServerPlugInDriverRef, _ objec
 
     // Owned objects
     case kSelector_OwnedObjects:
-        switch objectID {
-        case kPlugInObjectID:
-            outData.storeBytes(of: kDeviceObjectID, as: AudioObjectID.self)
-            outDataSize.pointee = 4
-        case kDeviceObjectID:
-            outData.storeBytes(of: kOutputStreamObjectID, as: AudioObjectID.self)
-            outDataSize.pointee = 4
-        default:
-            outDataSize.pointee = 0
+        let owned = ownedObjects(
+            for: objectID,
+            scope: scope,
+            qualifierClass: qualifierClassID(size: qualifierDataSize, data: qualifierData)
+        )
+        let ids = outData.assumingMemoryBound(to: AudioObjectID.self)
+        for (index, ownedID) in owned.enumerated() {
+            ids[index] = ownedID
         }
+        outDataSize.pointee = UInt32(MemoryLayout<AudioObjectID>.size * owned.count)
 
     // Device properties
     case kSelector_TransportType:
@@ -1386,6 +1620,61 @@ private func driverGetPropertyData(_ driver: AudioServerPlugInDriverRef, _ objec
         }
         outDataSize.pointee = UInt32(MemoryLayout<AudioStreamRangedDescription>.size * kSupportedSampleRates.count)
 
+    // Volume/mute controls (device-level selectors and control selectors
+    // read the same DriverState volume)
+    case kSelector_ControlScope:
+        outData.storeBytes(of: kScope_Output, as: UInt32.self)
+        outDataSize.pointee = 4
+
+    case kSelector_ControlElement:
+        outData.storeBytes(of: UInt32(0), as: UInt32.self)
+        outDataSize.pointee = 4
+
+    case kSelector_VolumeScalar, kSelector_LevelScalarValue:
+        outData.storeBytes(of: state.outputVolume().scalar, as: Float32.self)
+        outDataSize.pointee = 4
+
+    case kSelector_VolumeDecibels, kSelector_LevelDecibelValue:
+        outData.storeBytes(of: volumeScalarToDecibels(state.outputVolume().scalar), as: Float32.self)
+        outDataSize.pointee = 4
+
+    case kSelector_VolumeRangeDecibels, kSelector_LevelDecibelRange:
+        outData.storeBytes(
+            of: AudioValueRange(mMinimum: Float64(kVolumeMinDecibels), mMaximum: 0),
+            as: AudioValueRange.self
+        )
+        outDataSize.pointee = UInt32(MemoryLayout<AudioValueRange>.size)
+
+    case kSelector_VolumeScalarToDecibels, kSelector_LevelScalarToDecibels:
+        guard inDataSize >= UInt32(MemoryLayout<Float32>.size) else {
+            return kAudioHardwareBadPropertySizeError
+        }
+        let scalar = outData.load(as: Float32.self)
+        outData.storeBytes(of: volumeScalarToDecibels(scalar), as: Float32.self)
+        outDataSize.pointee = 4
+
+    case kSelector_VolumeDecibelsToScalar, kSelector_LevelDecibelsToScalar:
+        guard inDataSize >= UInt32(MemoryLayout<Float32>.size) else {
+            return kAudioHardwareBadPropertySizeError
+        }
+        let decibels = outData.load(as: Float32.self)
+        outData.storeBytes(of: volumeDecibelsToScalar(decibels), as: Float32.self)
+        outDataSize.pointee = 4
+
+    case kSelector_Mute, kSelector_BooleanValue:
+        outData.storeBytes(of: state.outputVolume().muted ? UInt32(1) : UInt32(0), as: UInt32.self)
+        outDataSize.pointee = 4
+
+    case kSelector_ControlList:
+        if objectID == kDeviceObjectID {
+            let ids = outData.assumingMemoryBound(to: AudioObjectID.self)
+            ids[0] = kVolumeControlObjectID
+            ids[1] = kMuteControlObjectID
+            outDataSize.pointee = UInt32(MemoryLayout<AudioObjectID>.size * 2)
+        } else {
+            outDataSize.pointee = 0
+        }
+
     // Empty lists
     case kSelector_PreferredLayout:
         // Return an AudioChannelLayout describing the current channel count.
@@ -1407,7 +1696,7 @@ private func driverGetPropertyData(_ driver: AudioServerPlugInDriverRef, _ objec
         layoutPtr[2] = 0              // mNumberChannelDescriptions
         outDataSize.pointee = 12
 
-    case kSelector_ControlList, kSelector_CustomPropertyInfo, kSelector_BoxList, kSelector_TranslateUID, kSelector_Icon:
+    case kSelector_CustomPropertyInfo, kSelector_BoxList, kSelector_TranslateUID, kSelector_Icon:
         outDataSize.pointee = 0
 
     default:
@@ -1494,6 +1783,35 @@ private func driverSetPropertyData(_ driver: AudioServerPlugInDriverRef, _ objec
             "Queued format request: sampleRate=\(requestedRate.map(String.init) ?? String(active.sampleRate)), "
                 + "channels=\(requestedChannels.map(String.init) ?? String(active.channelCount))"
         )
+
+    case kSelector_VolumeScalar, kSelector_LevelScalarValue:
+        guard dataSize >= UInt32(MemoryLayout<Float32>.size) else {
+            return kAudioHardwareBadPropertySizeError
+        }
+        let value = data.load(as: Float32.self)
+        guard value.isFinite else {
+            halLog("Rejected non-finite volume scalar: \(value)")
+            return kAudioHardwareIllegalOperationError
+        }
+        state.commitOutputVolume(scalar: value)
+
+    case kSelector_VolumeDecibels, kSelector_LevelDecibelValue:
+        guard dataSize >= UInt32(MemoryLayout<Float32>.size) else {
+            return kAudioHardwareBadPropertySizeError
+        }
+        let value = data.load(as: Float32.self)
+        guard value.isFinite else {
+            halLog("Rejected non-finite volume decibels: \(value)")
+            return kAudioHardwareIllegalOperationError
+        }
+        state.commitOutputVolume(scalar: volumeDecibelsToScalar(value))
+
+    case kSelector_Mute, kSelector_BooleanValue:
+        guard dataSize >= UInt32(MemoryLayout<UInt32>.size) else {
+            return kAudioHardwareBadPropertySizeError
+        }
+        let value = data.load(as: UInt32.self)
+        state.commitOutputVolume(muted: value != 0)
 
     default:
         halLog("SetProperty ignored: '\(fourCC(sel))'")

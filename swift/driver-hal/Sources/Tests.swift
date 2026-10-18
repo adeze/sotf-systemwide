@@ -67,6 +67,9 @@ final class HALDriverTests {
         var passed = 0
         var failed = 0
 
+        // Clock tests
+        if testZeroTimestampSurvivesRateReanchor() { passed += 1 } else { failed += 1 }
+
         // Ring buffer tests
         if testRingBufferBasicOperations() { passed += 1 } else { failed += 1 }
         if testRingBufferWrapAround() { passed += 1 } else { failed += 1 }
@@ -75,6 +78,7 @@ final class HALDriverTests {
 
         // Cross-language shared-memory ABI
         if testSharedAudioHeaderLayout() { passed += 1 } else { failed += 1 }
+        if testVolumeConversionAndSharedRoundTrip() { passed += 1 } else { failed += 1 }
         if testSampleRateRequestRemainsTransactional() { passed += 1 } else { failed += 1 }
         if testCrossProcessReconfigurationProtocol() { passed += 1 } else { failed += 1 }
         if testGeometryCacheSurvivesDaemonRestart() { passed += 1 } else { failed += 1 }
@@ -91,6 +95,35 @@ final class HALDriverTests {
         return failed == 0
     }
 
+    /// Regression: re-anchoring the clock on a sample-rate change lands the
+    /// anchor between period boundaries, so the zero timestamp floor is
+    /// *before* the anchor and the host-time offset is negative. The old
+    /// unsigned conversion trapped, crash-looping the driver host until
+    /// coreaudiod deactivated the device (2026-10-17).
+    static func testZeroTimestampSurvivesRateReanchor() -> Bool {
+        halLog("  Test: Zero timestamp survives sample-rate re-anchor")
+        for delayMicroseconds in [30_000, 41_000, 53_000, 67_000, 79_000] as [useconds_t] {
+            let clock = DriverClock()
+            clock.start(sampleRate: 48000)
+            usleep(delayMicroseconds)
+            clock.setSampleRate(96000)
+            let (sampleTime, hostTime, _) = clock.getZeroTimeStamp(period: 512)
+            guard hostTime > 0 else {
+                halLog("    FAIL: zero host time after re-anchor")
+                return false
+            }
+            guard sampleTime.truncatingRemainder(dividingBy: 512) == 0 else {
+                halLog("    FAIL: zero sample time \(sampleTime) is not period-aligned")
+                return false
+            }
+            guard hostTime <= mach_absolute_time() else {
+                halLog("    FAIL: zero host time is in the future")
+                return false
+            }
+        }
+        return true
+    }
+
     /// Keep the Swift mirror byte-for-byte compatible with Rust's
     /// `#[repr(C, align(8))] SharedAudioHeader`. Rust asserts the same table in
     /// `shared_memory/tests.rs`; changing either side without updating the
@@ -101,7 +134,8 @@ final class HALDriverTests {
         guard let manifest = sharedMemoryLayoutManifest(),
               // Rust's repr(C, align(8)) size includes trailing padding. Swift
               // exposes the same ABI value as `stride`; `size` only covers the
-              // last field and is therefore 140 bytes for this header.
+              // last field (which ends at byte 144 since the version-7
+              // volume fields filled the former padding).
               MemoryLayout<SharedAudioHeader>.stride == manifest.size,
               MemoryLayout<SharedAudioHeader>.alignment == manifest.alignment else {
             halLog(
@@ -125,6 +159,7 @@ final class HALDriverTests {
             "driver_ready": MemoryLayout<SharedAudioHeader>.offset(of: \.driverReady)!,
             "engine_ready": MemoryLayout<SharedAudioHeader>.offset(of: \.engineReady)!,
             "encrypted": MemoryLayout<SharedAudioHeader>.offset(of: \.encrypted)!,
+            "volume_scalar_bits": MemoryLayout<SharedAudioHeader>.offset(of: \.volumeScalarBits)!,
             "key_fingerprint": MemoryLayout<SharedAudioHeader>.offset(of: \.keyFingerprint)!,
             "frame_counter": MemoryLayout<SharedAudioHeader>.offset(of: \.frameCounter)!,
             "requested_sample_rate": MemoryLayout<SharedAudioHeader>.offset(of: \.requestedSampleRate)!,
@@ -134,11 +169,13 @@ final class HALDriverTests {
             "config_status": MemoryLayout<SharedAudioHeader>.offset(of: \.configStatus)!,
             "config_source": MemoryLayout<SharedAudioHeader>.offset(of: \.configSource)!,
             "config_error_code": MemoryLayout<SharedAudioHeader>.offset(of: \.configErrorCode)!,
+            "output_muted": MemoryLayout<SharedAudioHeader>.offset(of: \.outputMuted)!,
             "encryption_overflow_count": MemoryLayout<SharedAudioHeader>.offset(of: \.encryptionOverflowCount)!,
             "daemon_heartbeat_ms": MemoryLayout<SharedAudioHeader>.offset(of: \.daemonHeartbeatMs)!,
             "configuring": MemoryLayout<SharedAudioHeader>.offset(of: \.configuring)!,
             "configuring_ack": MemoryLayout<SharedAudioHeader>.offset(of: \.configuringAck)!,
             "requested_channel_count": MemoryLayout<SharedAudioHeader>.offset(of: \.requestedChannelCount)!,
+            "volume_generation": MemoryLayout<SharedAudioHeader>.offset(of: \.volumeGeneration)!,
         ]
         guard Set(actualOffsets.keys) == Set(manifest.fields.keys) else {
             halLog("    FAIL: manifest field set does not match Swift header")
@@ -146,6 +183,132 @@ final class HALDriverTests {
         }
         for (name, expected) in manifest.fields where actualOffsets[name] != expected {
             halLog("    FAIL: \(name) offset=\(String(describing: actualOffsets[name])), expected=\(expected)")
+            return false
+        }
+
+        halLog("    PASS")
+        return true
+    }
+
+    /// Volume conversion curve endpoints/clamps plus the shared-header
+    /// publication round trip the daemon polls (version 7 fields).
+    static func testVolumeConversionAndSharedRoundTrip() -> Bool {
+        halLog("  Test: volume conversion and shared round trip")
+
+        // Conversion endpoints and clamps.
+        guard volumeScalarToDecibels(1.0) == 0,
+              volumeScalarToDecibels(0) == kVolumeMinDecibels,
+              volumeDecibelsToScalar(0) == 1.0,
+              volumeDecibelsToScalar(kVolumeMinDecibels) == 0,
+              volumeDecibelsToScalar(6) == 1.0,
+              abs(volumeScalarToDecibels(0.5) - (-6.0206)) < 0.001,
+              abs(volumeDecibelsToScalar(-6.0206) - 0.5) < 0.001,
+              clampVolumeScalar(2.0) == 1.0,
+              clampVolumeScalar(-1.0) == 0,
+              clampVolumeScalar(.nan) == 1.0 else {
+            halLog("    FAIL: volume conversion endpoints or clamps are wrong")
+            return false
+        }
+
+        // Shared-header round trip on a daemon-style fixture file.
+        let fileManager = FileManager.default
+        let tempDir = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("sotf-hal-volume-\(UUID().uuidString)")
+        let shmPath = (tempDir as NSString).appendingPathComponent("audio.shm")
+        let headerSize = MemoryLayout<SharedAudioHeader>.size
+        let alignedHeaderSize = (headerSize + 63) & ~63
+        let totalSize = alignedHeaderSize + 64 * 2 * 16 * MemoryLayout<Float>.size
+
+        do {
+            try fileManager.createDirectory(
+                atPath: tempDir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            fileManager.createFile(atPath: shmPath, contents: Data(count: totalSize))
+            chmod(shmPath, 0o600)
+        } catch {
+            halLog("    FAIL: fixture setup failed: \(error)")
+            return false
+        }
+
+        var header = SharedAudioHeader(
+            magic: 0x534F5446,
+            version: 7,
+            sampleRate: 48_000,
+            bufferFrames: 64,
+            channelCount: 2,
+            writePosition: 0,
+            readPosition: 0,
+            active: 0,
+            configChanged: 0,
+            driverReady: 0,
+            engineReady: 1,
+            encrypted: 0,
+            volumeScalarBits: Float32(1.0).bitPattern,
+            keyFingerprint: 0,
+            frameCounter: 0,
+            requestedSampleRate: 48_000,
+            requestedBufferFrames: 64,
+            actualSampleRate: 48_000,
+            actualBufferFrames: 64,
+            configStatus: 1,
+            configSource: 0,
+            configErrorCode: 0,
+            outputMuted: 0,
+            encryptionOverflowCount: 0,
+            daemonHeartbeatMs: 0,
+            configuring: 0,
+            configuringAck: 0,
+            requestedChannelCount: 2,
+            volumeGeneration: 1
+        )
+
+        let fd = Darwin.open(shmPath, O_RDWR)
+        guard fd >= 0 else {
+            try? fileManager.removeItem(atPath: tempDir)
+            halLog("    FAIL: fixture open failed")
+            return false
+        }
+        let headerWritten = withUnsafeBytes(of: &header) { bytes in
+            Darwin.write(fd, bytes.baseAddress, bytes.count)
+        }
+        Darwin.close(fd)
+        guard headerWritten == headerSize else {
+            try? fileManager.removeItem(atPath: tempDir)
+            halLog("    FAIL: fixture header write failed")
+            return false
+        }
+
+        setenv("SOTF_HAL_SHARED_MEMORY_PATH", shmPath, 1)
+        defer {
+            unsetenv("SOTF_HAL_SHARED_MEMORY_PATH")
+            try? fileManager.removeItem(atPath: tempDir)
+        }
+
+        let sharedAudio = SharedAudioBuffer()
+        guard sharedAudio.initialize(sampleRate: 48_000, bufferFrames: 64, channelCount: 2) else {
+            halLog("    FAIL: SharedAudioBuffer.initialize failed")
+            return false
+        }
+        defer { sharedAudio.closeSharedMemory() }
+
+        let initial = sharedAudio.outputVolume()
+        guard initial.scalarBits == Float32(1.0).bitPattern, !initial.muted, initial.generation == 1 else {
+            halLog("    FAIL: initial volume readback is wrong: \(initial)")
+            return false
+        }
+
+        let generation = sharedAudio.setOutputVolume(
+            scalarBits: Float32(0.25).bitPattern,
+            muted: true
+        )
+        let updated = sharedAudio.outputVolume()
+        guard generation == 2,
+              updated.scalarBits == Float32(0.25).bitPattern,
+              updated.muted,
+              updated.generation == 2 else {
+            halLog("    FAIL: published volume readback is wrong: \(updated)")
             return false
         }
 
@@ -188,7 +351,7 @@ final class HALDriverTests {
 
         var header = SharedAudioHeader(
             magic: 0x534F5446,
-            version: 6,
+            version: 7,
             sampleRate: sampleRate,
             bufferFrames: bufferFrames,
             channelCount: channelCount,
@@ -199,6 +362,7 @@ final class HALDriverTests {
             driverReady: 0,
             engineReady: 1,
             encrypted: 0,
+            volumeScalarBits: 0,
             keyFingerprint: 0,
             frameCounter: 0,
             requestedSampleRate: sampleRate,
@@ -208,11 +372,13 @@ final class HALDriverTests {
             configStatus: 1,
             configSource: 0,
             configErrorCode: 0,
+            outputMuted: 0,
             encryptionOverflowCount: 0,
             daemonHeartbeatMs: 0,
             configuring: 0,
             configuringAck: 0,
-            requestedChannelCount: channelCount
+            requestedChannelCount: channelCount,
+            volumeGeneration: 0
         )
 
         let fd = Darwin.open(shmPath, O_RDWR)
@@ -316,7 +482,7 @@ final class HALDriverTests {
 
         var header = SharedAudioHeader(
             magic: 0x534F5446,
-            version: 6,
+            version: 7,
             sampleRate: sampleRate,
             bufferFrames: bufferFrames,
             channelCount: activeChannels,
@@ -327,6 +493,7 @@ final class HALDriverTests {
             driverReady: 0,
             engineReady: 1,
             encrypted: 0,
+            volumeScalarBits: 0,
             keyFingerprint: 0,
             frameCounter: 0,
             requestedSampleRate: sampleRate,
@@ -336,11 +503,13 @@ final class HALDriverTests {
             configStatus: 1,
             configSource: 0,
             configErrorCode: 0,
+            outputMuted: 0,
             encryptionOverflowCount: 0,
             daemonHeartbeatMs: 0,
             configuring: 0,
             configuringAck: 0,
-            requestedChannelCount: activeChannels
+            requestedChannelCount: activeChannels,
+            volumeGeneration: 0
         )
         let fd = Darwin.open(shmPath, O_RDWR)
         guard fd >= 0 else {
@@ -569,7 +738,7 @@ final class HALDriverTests {
 
         var header = SharedAudioHeader(
             magic: 0x534F5446,
-            version: 6,
+            version: 7,
             sampleRate: sampleRate,
             bufferFrames: bufferFrames,
             channelCount: activeChannels,
@@ -580,6 +749,7 @@ final class HALDriverTests {
             driverReady: 1,
             engineReady: 1,
             encrypted: 0,
+            volumeScalarBits: 0,
             keyFingerprint: 0,
             frameCounter: 0,
             requestedSampleRate: sampleRate,
@@ -589,11 +759,13 @@ final class HALDriverTests {
             configStatus: 1,
             configSource: 0,
             configErrorCode: 0,
+            outputMuted: 0,
             encryptionOverflowCount: 0,
             daemonHeartbeatMs: 1,
             configuring: 0,
             configuringAck: 0,
-            requestedChannelCount: activeChannels
+            requestedChannelCount: activeChannels,
+            volumeGeneration: 0
         )
 
         let fd = Darwin.open(shmPath, O_RDWR)
@@ -1279,7 +1451,7 @@ final class HALDriverTests {
 
         var header = SharedAudioHeader(
             magic: 0x534F5446,
-            version: 6,
+            version: 7,
             sampleRate: sampleRate,
             bufferFrames: bufferFrames,
             channelCount: channelCount,
@@ -1290,6 +1462,7 @@ final class HALDriverTests {
             driverReady: 0,
             engineReady: 1,
             encrypted: 1,
+            volumeScalarBits: 0,
             keyFingerprint: fingerprintUInt64(cipher.getFingerprint()),
             frameCounter: 0,
             requestedSampleRate: sampleRate,
@@ -1299,11 +1472,13 @@ final class HALDriverTests {
             configStatus: 1,
             configSource: 2,
             configErrorCode: 0,
+            outputMuted: 0,
             encryptionOverflowCount: 0,
             daemonHeartbeatMs: 0,
             configuring: 0,
             configuringAck: 0,
-            requestedChannelCount: channelCount
+            requestedChannelCount: channelCount,
+            volumeGeneration: 0
         )
 
         let fd = Darwin.open(shmPath, O_RDWR)

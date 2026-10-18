@@ -533,6 +533,30 @@ impl CaptureResumeTracker {
     }
 }
 
+/// Tracks the last driver volume generation applied to the engine so
+/// driver-originated volume changes (macOS media keys adjusting the HAL
+/// virtual device's volume control) apply exactly once per publication.
+///
+/// Daemon-originated changes echo back through the same generation counter
+/// and are reported too; re-applying the identical volume/mute is a cheap
+/// no-op on the manager. The first observation after startup deliberately
+/// counts as a change so the persisted driver volume is adopted.
+#[derive(Debug, Default)]
+pub(super) struct VolumeSyncTracker {
+    applied_generation: u32,
+}
+
+impl VolumeSyncTracker {
+    pub(super) fn observe(&mut self, published: Option<(f32, bool, u32)>) -> Option<(f32, bool)> {
+        let (volume, muted, generation) = published?;
+        if generation == 0 || generation == self.applied_generation {
+            return None;
+        }
+        self.applied_generation = generation;
+        Some((volume, muted))
+    }
+}
+
 /// Debounces HAL-initiated config requests so an interface clock flapping
 /// between rates while it renegotiates does not tear the pipeline down on
 /// every poll.
@@ -900,6 +924,12 @@ impl SystemwideController {
             );
             log::info!("Driver config watcher thread started");
             let mut config_debouncer = ConfigChangeDebouncer::new();
+            let mut volume_sync = VolumeSyncTracker::default();
+            let mut device_listener = super::device_listener::OutputDeviceListener::new();
+            let mut external_rate_pending_since: Option<Instant> = None;
+            // A nominal-rate change lands while the device resets its IO
+            // cycle; re-read only after the rate has settled briefly.
+            const EXTERNAL_RATE_SETTLE: Duration = Duration::from_millis(250);
             loop {
                 if !*daemon.running.lock() {
                     break;
@@ -913,6 +943,7 @@ impl SystemwideController {
                     handle_driver_config_change(
                         &daemon.driver_manager,
                         &daemon.manager,
+                        &daemon.device_registry,
                         config,
                         &daemon.system_state,
                         &daemon.running,
@@ -972,6 +1003,71 @@ impl SystemwideController {
                                 );
                             }
                         }
+                    }
+                }
+
+                // Physical-device property events (macOS CoreAudio
+                // listeners): sample-rate changes made in Audio MIDI Setup
+                // or another host, plus device/default churn. Device
+                // churn only invalidates cached enumeration; a settled
+                // nominal-rate change on the applied output is treated
+                // like a HAL config request so it gets the same
+                // negotiation, acknowledgement, and rollback handling.
+                let applied_device = daemon.system_state.lock().applied_output_device();
+                device_listener.watch_output_device(applied_device.as_deref());
+                for event in device_listener.drain_events() {
+                    match event {
+                        super::device_listener::DevicePropertyEvent::NominalRate => {
+                            daemon.device_registry.lock().invalidate();
+                            external_rate_pending_since = Some(Instant::now());
+                        }
+                        super::device_listener::DevicePropertyEvent::DeviceList
+                        | super::device_listener::DevicePropertyEvent::DefaultOutput => {
+                            daemon.device_registry.lock().invalidate();
+                            device_listener.invalidate_watch();
+                        }
+                    }
+                }
+                if external_rate_pending_since
+                    .is_some_and(|since| since.elapsed() >= EXTERNAL_RATE_SETTLE)
+                {
+                    external_rate_pending_since = None;
+                    let _mutation = daemon.pipeline_mutation.lock();
+                    let driver_status = daemon.driver_manager.lock().status();
+                    let applied_device = daemon.system_state.lock().applied_output_device();
+                    let request = applied_device.as_deref().and_then(|name| {
+                        super::device_listener::external_rate_request(
+                            &driver_status,
+                            device_listener.nominal_sample_rate(name),
+                        )
+                    });
+                    if let Some(config) = request {
+                        log::info!(
+                            "Output device nominal sample rate changed externally; reconfiguring to {} Hz",
+                            config.sample_rate
+                        );
+                        handle_driver_config_change(
+                            &daemon.driver_manager,
+                            &daemon.manager,
+                            &daemon.device_registry,
+                            config,
+                            &daemon.system_state,
+                            &daemon.running,
+                        );
+                    }
+                }
+
+                // Driver-published volume (HAL media keys/sliders) follows
+                // the engine master volume. Lock order: driver_manager is
+                // released before manager is acquired.
+                let published_volume = daemon.driver_manager.lock().output_volume();
+                if let Some((volume, muted)) = volume_sync.observe(published_volume) {
+                    let manager = daemon.manager.lock();
+                    if let Err(error) = manager.set_volume(volume) {
+                        log::warn!("Failed to apply driver volume {volume}: {error}");
+                    }
+                    if let Err(error) = manager.set_mute(muted) {
+                        log::warn!("Failed to apply driver mute {muted}: {error}");
                     }
                 }
 
@@ -1582,11 +1678,22 @@ impl SystemwideController {
     }
 
     pub(super) fn handle_set_volume(&self, volume: f32) -> Response {
-        let manager = self.manager.lock();
-        match manager.set_volume(volume) {
-            Ok(()) => Response::ok_empty(),
-            Err(error) => Response::err(format!("Failed to set volume: {error}")),
-        }
+        let muted = {
+            let manager = self.manager.lock();
+            match manager.set_volume(volume) {
+                Ok(()) => manager.is_muted(),
+                Err(error) => {
+                    return Response::err(format!("Failed to set volume: {error}"));
+                }
+            }
+        };
+        // Keep the driver's OS-visible volume control (media-key OSD,
+        // sliders) in sync with IPC-originated changes. The watcher sees
+        // the new generation and re-applies the identical values, which is
+        // a no-op on the manager. Lock order: manager released above
+        // before driver_manager is acquired.
+        self.driver_manager.lock().set_output_volume(volume, muted);
+        Response::ok_empty()
     }
 
     pub(super) fn handle_list_devices(&self) -> Response {
@@ -1920,8 +2027,11 @@ impl SystemwideController {
         // before the fast path so a no-op re-apply still skips the restart
         // while diverged. Explicit route changes validate the device before
         // reaching here, so substitution never masks a live user intent.
-        let effective =
-            super::misc::resolve_effective_output_device(plan.spec.output_device.as_deref());
+        let effective = super::misc::effective_output_for_sink(
+            super::misc::resolve_effective_output_device(plan.spec.output_device.as_deref()),
+            self.driver_manager.lock().output_sink_type(),
+            plan.spec.output_device.as_deref(),
+        );
         if let Some(fallback) = &effective.fallback {
             log::warn!(
                 "Desired output device '{}' is not available; falling back to default output '{}'",

@@ -470,12 +470,18 @@ fn swift_shared_memory_is_open_only_for_restricted_hal_process() {
 }
 
 #[test]
-fn swift_shared_memory_protocol_matches_rust_v6_configuring_handshake() {
+fn swift_shared_memory_protocol_matches_rust_v7_configuring_handshake() {
     let source = read_repo_file("sotf-systemwide/swift/driver-hal/Sources/SharedMemory.swift");
 
     assert!(
-        source.contains("private let kSharedMemoryVersion: UInt32 = 6"),
-        "Swift shared-memory protocol version must match Rust v6"
+        source.contains("private let kSharedMemoryVersion: UInt32 = 7"),
+        "Swift shared-memory protocol version must match Rust v7"
+    );
+    assert!(
+        source.contains("var volumeScalarBits: UInt32")
+            && source.contains("var outputMuted: UInt32")
+            && source.contains("var volumeGeneration: UInt32"),
+        "Swift SharedAudioHeader must mirror the Rust v7 volume fields"
     );
     assert!(
         source.contains("var configuring: UInt32"),

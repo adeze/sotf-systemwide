@@ -20,7 +20,10 @@ private let kSharedMemoryMagic: UInt32 = 0x534F5446
 /// Version 4: Added daemon heartbeat for stale-engine detection in the HAL driver
 /// Version 5: Added configuring handshake for daemon-side reconfiguration
 /// Version 6: Added a quiesce acknowledgment and pending channel geometry.
-private let kSharedMemoryVersion: UInt32 = 6
+/// Version 7: Added output volume fields (volumeScalarBits, outputMuted,
+/// volumeGeneration) in former padding slots so the HAL volume control
+/// (OS media keys) and the daemon share one volume state.
+private let kSharedMemoryVersion: UInt32 = 7
 private let kDaemonHeartbeatTimeoutMs: UInt64 = 3_000
 
 /// Encrypted audio record magic: 'SEA1' (SotF Encrypted Audio v1)
@@ -253,6 +256,7 @@ struct SharedAudioHeader {
 
     // Encryption fields (version 2+)
     var encrypted: UInt32       // 0 = disabled, 1 = enabled
+    var volumeScalarBits: UInt32 // Output volume scalar bits (version 7+)
     // First 8 bytes of SHA256, stored as a UInt64 with canonical big-endian
     // conversion. This mirrors Rust's AtomicU64 field and keeps the offset
     // aligned at byte 64.
@@ -267,6 +271,7 @@ struct SharedAudioHeader {
     var configStatus: UInt32            // 0=pending, 1=accepted, 2=negotiated, 3=error
     var configSource: UInt32            // 1=HAL initiated, 2=Daemon initiated
     var configErrorCode: UInt32         // Error code if configStatus=3
+    var outputMuted: UInt32             // Output mute flag (version 7+)
 
     // Statistics
     var encryptionOverflowCount: UInt64 // Encrypted write drops due to insufficient ring space
@@ -276,6 +281,7 @@ struct SharedAudioHeader {
     var configuring: UInt32             // Daemon is mutating geometry/ring positions
     var configuringAck: UInt32          // IO participant observed configuring=1
     var requestedChannelCount: UInt32   // Pending channel geometry request
+    var volumeGeneration: UInt32        // Volume publication counter (version 7+)
 }
 
 private struct EncryptedRecordMetadata {
@@ -1248,6 +1254,35 @@ final class SharedAudioBuffer {
     func clearConfigChanged() {
         guard let header = header else { return }
         atomicStore(&header.pointee.configChanged, 0)
+    }
+
+    // MARK: - Output Volume Methods (version 7+)
+
+    /// Current shared output volume. Generation 0 means neither side has
+    /// published a volume yet and the values are meaningless.
+    func outputVolume() -> (scalarBits: UInt32, muted: Bool, generation: UInt32) {
+        guard let header = header else { return (0, false, 0) }
+        let generation = atomicLoad(&header.pointee.volumeGeneration)
+        let scalarBits = atomicLoad(&header.pointee.volumeScalarBits)
+        let muted = atomicLoad(&header.pointee.outputMuted) != 0
+        return (scalarBits, muted, generation)
+    }
+
+    /// Publish an output volume change and return the new generation.
+    ///
+    /// Memory ordering mirrors the Rust side: values are release-stored
+    /// before the generation, so a reader that observes the new generation
+    /// also observes the values. Generation 0 is the "unpublished"
+    /// sentinel and is skipped on wraparound.
+    @discardableResult
+    func setOutputVolume(scalarBits: UInt32, muted: Bool) -> UInt32 {
+        guard let header = header else { return 0 }
+        atomicStore(&header.pointee.volumeScalarBits, scalarBits)
+        atomicStore(&header.pointee.outputMuted, muted ? 1 : 0)
+        var generation = atomicLoad(&header.pointee.volumeGeneration) &+ 1
+        if generation == 0 { generation = 1 }
+        atomicStore(&header.pointee.volumeGeneration, generation)
+        return generation
     }
 
     deinit {

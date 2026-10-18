@@ -2,9 +2,10 @@
 use super::audio_daemon::{
     AudioDaemon, CaptureResumeTracker, ConfigChangeDebouncer, METERING_LATENCY_BUDGET_MICROS,
     PIPELINE_RESPONSE_BUDGET_BYTES, PLAYBACK_IDLE_REBUILD_THRESHOLD, RuntimeTelemetry,
-    changed_plugin_parameters, encode_plugin_param_value, join_initial_playback_thread,
-    pipeline_timing_after_config_request, rack_plugins_to_linear_graph, reorder_linear_graph,
-    startup_channel_geometry, wait_for_playback_observation,
+    VolumeSyncTracker, changed_plugin_parameters, encode_plugin_param_value,
+    join_initial_playback_thread, pipeline_timing_after_config_request,
+    rack_plugins_to_linear_graph, reorder_linear_graph, startup_channel_geometry,
+    wait_for_playback_observation,
 };
 use super::audio_daemon::{ClientSlot, clone_client_shutdown_stream, try_acquire_client_slot};
 use super::command::Command;
@@ -14,9 +15,11 @@ use super::device_registry::DeviceRegistry;
 use super::driver_manager::DriverManager;
 use super::loudness::{loudness_data_to_json, loudness_info_to_json};
 use super::misc::push_metering_faults;
-use super::misc::resolve_effective_output_device;
 use super::misc::sanitize_user_plugins;
 use super::misc::transport_snapshot_and_faults;
+use super::misc::{
+    LAB_OUTPUT_DEVICE_NAME, effective_output_for_sink, resolve_effective_output_device,
+};
 use super::misc::{
     build_driver_plugin_chain, build_driver_plugin_graph, is_safe_output_device_name,
     parameter_descriptor_to_json,
@@ -41,10 +44,10 @@ use crate::plugin_artifact::{PluginArtifactPlan, plan_plugin_artifact};
 use driver_common::DriverConfig;
 use parking_lot::Mutex;
 use serde_json::Value;
-use sotf_audio::PluginConfig;
 use sotf_audio::engine::{PluginGraphConfig, PluginGraphEdgeConfig, PluginGraphNodeConfig};
 use sotf_audio::manager::AudioEngineManager;
 use sotf_audio::plugins::PluginType;
+use sotf_audio::{PluginConfig, SinkType};
 use std::io::{BufRead, BufReader, Cursor, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -889,6 +892,8 @@ mod ipc_safety_tests {
         pending_config_change: Option<DriverConfig>,
         fail_next_config: Option<String>,
         config_failures_remaining: usize,
+        published_volume: Option<(f32, bool, u32)>,
+        volume_generation: u32,
     }
 
     #[derive(Debug, Clone)]
@@ -964,6 +969,18 @@ mod ipc_safety_tests {
         fn set_engine_ready(&mut self, ready: bool) {
             self.state.lock().engine_ready = ready;
         }
+
+        fn output_volume(&mut self) -> Option<(f32, bool, u32)> {
+            self.state.lock().published_volume
+        }
+
+        fn set_output_volume(&mut self, volume: f32, muted: bool) -> Option<u32> {
+            let mut state = self.state.lock();
+            state.volume_generation += 1;
+            let generation = state.volume_generation;
+            state.published_volume = Some((volume, muted, generation));
+            Some(generation)
+        }
     }
 
     fn fake_driver_state() -> Arc<Mutex<FakeDriverState>> {
@@ -976,6 +993,8 @@ mod ipc_safety_tests {
             pending_config_change: None,
             fail_next_config: None,
             config_failures_remaining: 0,
+            published_volume: None,
+            volume_generation: 0,
         }))
     }
 
@@ -2227,6 +2246,7 @@ mod ipc_safety_tests {
         handle_driver_config_change(
             &daemon.driver_manager,
             &daemon.manager,
+            &daemon.device_registry,
             DriverConfig::new(48_000, 512, 10),
             &daemon.system_state,
             &daemon.running,
@@ -2248,6 +2268,86 @@ mod ipc_safety_tests {
         let (actual, result) = state.last_ack.as_ref().expect("config ack");
         assert_eq!(actual.channel_count, 10);
         assert!(matches!(result, ConfigResult::Accepted));
+    }
+
+    #[test]
+    fn testkit_driver_config_change_negotiates_rate_against_output_device() {
+        // Regression: a stored 96 kHz setup whose interface caps at 48 kHz
+        // desynchronized at startup because the driver-config watcher
+        // restarted the engine at the HAL-requested rate without the
+        // device-support negotiation the IPC apply path performs. The
+        // acknowledged config must carry the negotiated rate so the HAL
+        // nominal rate follows the engine instead of re-requesting 96 kHz.
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(Arc::clone(&state));
+        {
+            let mut pipeline = daemon.system_state.lock();
+            let plan = pipeline
+                .prepare_with_selected_device("ADAM Audio D3V".to_string())
+                .expect("valid device plan");
+            pipeline.commit_applied(&plan);
+        }
+        // The test daemon's lab sink adapts every physical name to the lab
+        // output, so negotiation keys on the lab device name. Seeding the
+        // registry cache keeps the test independent of local hardware.
+        daemon.device_registry.lock().seed_negotiated_sample_rate(
+            LAB_OUTPUT_DEVICE_NAME,
+            96_000,
+            48_000,
+        );
+
+        handle_driver_config_change(
+            &daemon.driver_manager,
+            &daemon.manager,
+            &daemon.device_registry,
+            DriverConfig::new(96_000, 512, 2),
+            &daemon.system_state,
+            &daemon.running,
+        );
+
+        let state = state.lock();
+        let (actual, result) = state.last_ack.as_ref().expect("config ack");
+        assert_eq!(actual.sample_rate, 48_000);
+        assert!(
+            matches!(
+                result,
+                ConfigResult::Negotiated {
+                    actual_rate: 48_000,
+                    ..
+                }
+            ),
+            "driver must be told the negotiated rate: {result:?}"
+        );
+    }
+
+    #[test]
+    fn volume_sync_tracker_applies_each_generation_once() {
+        let mut tracker = VolumeSyncTracker::default();
+        // No control / unpublished volume never applies.
+        assert_eq!(tracker.observe(None), None);
+        assert_eq!(tracker.observe(Some((0.5, false, 0))), None);
+        // First real publication applies (startup adopts persisted volume).
+        assert_eq!(tracker.observe(Some((0.5, true, 7))), Some((0.5, true)));
+        // Same generation is not re-applied on later polls.
+        assert_eq!(tracker.observe(Some((0.5, true, 7))), None);
+        // Each new generation applies exactly once.
+        assert_eq!(tracker.observe(Some((0.75, false, 8))), Some((0.75, false)));
+        assert_eq!(tracker.observe(Some((0.75, false, 8))), None);
+    }
+
+    #[test]
+    fn testkit_set_volume_publishes_to_driver_control() {
+        let state = fake_driver_state();
+        let daemon = test_daemon_with_driver(Arc::clone(&state));
+
+        let response = daemon.handle_command(Command::SetVolume { volume: 0.4 });
+
+        assert!(response.success, "set_volume must succeed: {response:?}");
+        assert_eq!(
+            state.lock().published_volume,
+            Some((0.4, false, 1)),
+            "IPC volume must publish to the driver volume control"
+        );
     }
 
     #[test]
@@ -2909,10 +3009,18 @@ mod ipc_safety_tests {
             .set_desired_output_device(Some("Definitely Missing Physical Output".to_string()))
             .expect("safe explicit output name");
 
-        // Live expectation: the lab engine opens any device name, so the
-        // apply must succeed on every machine while committing exactly what
-        // the resolver selected for this machine's enumeration.
-        let expected = resolve_effective_output_device(Some("Definitely Missing Physical Output"));
+        // Live expectation: the apply must succeed on every machine while
+        // committing exactly what resolution selected for this machine's
+        // enumeration, adapted to the lab sink — the device-free lab
+        // backend rejects physical fallback names outright, so in lab
+        // mode the effective output is the lab output itself. (This test
+        // previously assumed the lab engine opens any device name and
+        // therefore only passed on machines without audio hardware.)
+        let expected = effective_output_for_sink(
+            resolve_effective_output_device(Some("Definitely Missing Physical Output")),
+            SinkType::LabNull,
+            Some("Definitely Missing Physical Output"),
+        );
         let response = daemon.handle_command(Command::LoadPlugins {
             plugins: Vec::new(),
             input_channels: 2,
@@ -2952,16 +3060,30 @@ mod ipc_safety_tests {
                 .expect("safe explicit output name");
             state.commit_applied(&previous_plan);
             state
-                .prepare_plan(vec![test_plugin("definitely_invalid_plugin")], 6, 2, 6)
+                .prepare_plan(vec![], 6, 2, 6)
                 .expect("valid requested geometry")
         };
         let driver_status = driver_state.lock().status.clone();
+        // Fail the requested start at the HAL configure step. (This test
+        // previously used an invalid plugin type, but the start only ever
+        // failed because the lab engine rejected the missing physical
+        // output device; with lab outputs resolved device-free, the
+        // failure must come from a step that genuinely fails.)
+        driver_state.lock().fail_next_config = Some("injected HAL config failure".to_string());
 
         let response = daemon.apply_pipeline_plan(requested_plan, driver_status, 48_000, 512);
 
         assert!(
             !response.success,
-            "invalid plugin must fail the requested start"
+            "failed HAL configure must fail the apply"
+        );
+        assert!(
+            response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("restored the last working pipeline")),
+            "rollback must restore the previous pipeline: {:?}",
+            response.error
         );
         let requested_channels: Vec<u32> = driver_state
             .lock()
@@ -2974,7 +3096,10 @@ mod ipc_safety_tests {
             vec![6, 2],
             "rollback must restore HAL to the previous graph's input geometry"
         );
-        assert!(!driver_state.lock().engine_ready);
+        assert!(
+            driver_state.lock().engine_ready,
+            "restored previous pipeline must mark the engine ready again"
+        );
     }
 }
 

@@ -1,6 +1,8 @@
 use super::audio_daemon::{AudioDaemon, wait_for_playback_observation};
+use super::configured::configured_output_device;
 use super::consts::MAX_HAL_CHANNELS;
 use super::consts::SUPPORTED_SAMPLE_RATES;
+use super::device_registry::DeviceRegistry;
 use super::driver_manager::DriverManager;
 use super::systemwide_state::SystemwideState;
 use super::types::PipelineReconfigureOutcome;
@@ -79,6 +81,7 @@ pub(super) fn publish_reconfigured_driver_readiness(
 pub(super) fn handle_driver_config_change(
     driver_manager: &Arc<Mutex<DriverManager>>,
     audio_manager: &Arc<Mutex<AudioEngineManager>>,
+    device_registry: &Arc<Mutex<DeviceRegistry>>,
     config: DriverConfig,
     system_state: &Arc<Mutex<SystemwideState>>,
     running: &Arc<Mutex<bool>>,
@@ -139,7 +142,7 @@ pub(super) fn handle_driver_config_change(
     }
 
     // Determine actual rate to use
-    let actual_rate = if SUPPORTED_SAMPLE_RATES.contains(&requested_rate) {
+    let mut actual_rate = if SUPPORTED_SAMPLE_RATES.contains(&requested_rate) {
         requested_rate
     } else {
         SUPPORTED_SAMPLE_RATES
@@ -149,12 +152,48 @@ pub(super) fn handle_driver_config_change(
             .unwrap_or(48000)
     };
 
+    // Same device-support negotiation as the IPC apply path. A HAL rate
+    // request can outlive the interface it was set for: the stored setup
+    // says 96 kHz while the interface now runs at (or caps at) 48 kHz.
+    // Starting the engine above the device maximum leaves the hardware
+    // clock at its own rate while processing assumes the requested one,
+    // which desynchronizes playback until the user switches rates back
+    // and forth manually. The acknowledgement below reports the
+    // negotiated rate to the driver, so HAL and engine stay coherent.
+    let output_sink_type = driver_manager.lock().output_sink_type();
+    let desired_device = system_state
+        .lock()
+        .selected_output_device()
+        .or_else(configured_output_device);
+    let effective = super::misc::effective_output_for_sink(
+        super::misc::resolve_effective_output_device(desired_device.as_deref()),
+        output_sink_type.clone(),
+        desired_device.as_deref(),
+    );
+    if let Some(device_name) = effective.device.as_deref() {
+        let lab_backend = driver_manager.lock().is_lab_backend();
+        match device_registry
+            .lock()
+            .negotiate_sample_rate(device_name, actual_rate, lab_backend)
+        {
+            Ok(rate) if rate != actual_rate => {
+                log::warn!(
+                    "Output device '{device_name}' does not support {actual_rate} Hz; using {rate} Hz",
+                );
+                actual_rate = rate;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!("Sample-rate check skipped: {error}");
+            }
+        }
+    }
+
     // Reconfigure audio pipeline
     // Stop publishing input frames while the old engine is being torn down.
     // A failed restart must not leave HAL believing that a stopped engine is
     // still ready to consume audio.
     driver_manager.lock().set_engine_ready(false);
-    let output_sink_type = driver_manager.lock().output_sink_type();
     match reconfigure_audio_pipeline_with_sink(
         audio_manager,
         system_state,
@@ -301,8 +340,11 @@ fn reconfigure_audio_pipeline_with_sink(
     // idle early return so an idle commit still records the desired device
     // verbatim. The restore plan resolves too: the applied device may itself
     // have vanished mid-session.
-    let effective =
-        super::misc::resolve_effective_output_device(plan.spec.output_device.as_deref());
+    let effective = super::misc::effective_output_for_sink(
+        super::misc::resolve_effective_output_device(plan.spec.output_device.as_deref()),
+        sink_type.clone(),
+        plan.spec.output_device.as_deref(),
+    );
     if let Some(fallback) = &effective.fallback {
         log::warn!(
             "Desired output device '{}' is not available; falling back to default output '{}'",
@@ -315,8 +357,11 @@ fn reconfigure_audio_pipeline_with_sink(
     plan.spec.output_device = effective.device;
     let mut previous_plan = previous_plan;
     if let Some(previous) = previous_plan.as_mut() {
-        let effective =
-            super::misc::resolve_effective_output_device(previous.spec.output_device.as_deref());
+        let effective = super::misc::effective_output_for_sink(
+            super::misc::resolve_effective_output_device(previous.spec.output_device.as_deref()),
+            sink_type.clone(),
+            previous.spec.output_device.as_deref(),
+        );
         previous.spec.output_device = effective.device;
     }
 

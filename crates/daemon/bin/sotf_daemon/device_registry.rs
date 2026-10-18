@@ -199,6 +199,24 @@ impl DeviceRegistry {
         Ok(negotiated)
     }
 
+    /// Test seam: pre-populate the negotiation cache so rate negotiation
+    /// can be exercised without local audio hardware.
+    #[cfg(test)]
+    pub(super) fn seed_negotiated_sample_rate(
+        &mut self,
+        selected_device: &str,
+        desired: u32,
+        negotiated: u32,
+    ) {
+        self.negotiated_sample_rates.insert(
+            (selected_device.to_string(), desired),
+            Cached {
+                observed_at: Instant::now(),
+                value: negotiated,
+            },
+        );
+    }
+
     pub(super) fn invalidate(&mut self) {
         self.generation = self.generation.saturating_add(1);
         self.devices = None;

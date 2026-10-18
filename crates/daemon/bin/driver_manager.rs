@@ -123,6 +123,18 @@ impl DriverManager {
     pub fn request_config(&mut self, config: DriverConfig) -> ConfigResult {
         self.driver.request_config(config)
     }
+
+    /// Current driver-published output volume (scalar, muted, generation),
+    /// when the driver exposes an OS-visible volume control.
+    pub fn output_volume(&mut self) -> Option<(f32, bool, u32)> {
+        self.driver.output_volume()
+    }
+
+    /// Publish a daemon-originated volume change to the driver's control.
+    /// Returns the new generation when the driver has a volume control.
+    pub fn set_output_volume(&mut self, volume: f32, muted: bool) -> Option<u32> {
+        self.driver.set_output_volume(volume, muted)
+    }
 }
 
 /// Create the appropriate platform audio driver.

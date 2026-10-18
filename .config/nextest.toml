@@ -1,0 +1,12 @@
+# Daemon tests that enumerate live audio devices or start real engine
+# pipelines (in-process testkit applies, command round-trips, spawned lab
+# daemons) contend for live audio-device state and CPU when nextest runs
+# them as parallel processes: enumerated device lists change between a
+# test's expectation and its apply, and engine starts starve. They share
+# one serial lane; everything else keeps full parallelism.
+[test-groups.live-audio]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(sotf-daemon) and (binary(ipc_line_tests) or test(/ipc_safety_tests::|command_roundtrip_tests::/))'
+test-group = 'live-audio'

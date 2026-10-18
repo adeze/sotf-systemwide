@@ -1,6 +1,7 @@
 use driver_common::DriverStatus;
 use serde_json::Value;
 use sotf_audio::PluginConfig;
+use sotf_audio::SinkType;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -709,6 +710,50 @@ pub(super) struct OutputDeviceFallback {
     pub(super) applied: String,
 }
 
+/// The only output-device name the device-free lab sink accepts besides
+/// `None`; any physical name is rejected by the engine.
+pub(super) const LAB_OUTPUT_DEVICE_NAME: &str = "Systemwide Lab Output";
+
+/// Adapt a resolved output to the sink that will actually open it.
+///
+/// The lab sink is device-free by design, so substituting a physical
+/// fallback device for a missing desired one only guarantees the engine
+/// rejects the start ("Lab backend cannot open a physical output
+/// device") — on machines with real audio hardware, while device-less CI
+/// resolved to `None` and passed. In lab mode the effective device is
+/// the lab output itself, recorded as a fallback from the desired name.
+pub(super) fn effective_output_for_sink(
+    effective: EffectiveOutputDevice,
+    sink_type: SinkType,
+    desired_device: Option<&str>,
+) -> EffectiveOutputDevice {
+    if sink_type != SinkType::LabNull {
+        return effective;
+    }
+    let Some(device) = effective.device else {
+        return effective;
+    };
+    if device == LAB_OUTPUT_DEVICE_NAME {
+        return EffectiveOutputDevice {
+            device: Some(device),
+            fallback: effective.fallback,
+        };
+    }
+    let desired = effective
+        .fallback
+        .as_ref()
+        .map(|fallback| fallback.desired.clone())
+        .or_else(|| desired_device.map(str::to_string))
+        .unwrap_or(device);
+    EffectiveOutputDevice {
+        device: Some(LAB_OUTPUT_DEVICE_NAME.to_string()),
+        fallback: Some(OutputDeviceFallback {
+            desired,
+            applied: LAB_OUTPUT_DEVICE_NAME.to_string(),
+        }),
+    }
+}
+
 /// Engine-start device resolution: what to open, plus the fallback record
 /// when a missing desired device was substituted.
 pub(super) struct EffectiveOutputDevice {
@@ -907,12 +952,14 @@ pub(super) fn list_audio_devices() -> Result<Vec<serde_json::Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FallbackCandidate, acquire_daemon_instance_lock, clarify_device_absence_error,
-        clarify_device_absence_error_with_devices, device_is_enumerated, list_audio_devices,
+        EffectiveOutputDevice, FallbackCandidate, acquire_daemon_instance_lock,
+        clarify_device_absence_error, clarify_device_absence_error_with_devices,
+        device_is_enumerated, effective_output_for_sink, list_audio_devices,
         resolve_effective_output_device, resolve_effective_output_device_with_candidates,
         scaled_buffer_frames_for_rate_change, select_fallback_output_device,
         startup_error_is_device_availability, wait_for_output_device,
     };
+    use sotf_audio::SinkType;
 
     #[test]
     fn rate_change_scales_frames_to_keep_block_duration() {
@@ -1205,6 +1252,54 @@ mod tests {
         let effective = resolve_effective_output_device_with_candidates("ASIO:EVO8", &candidates);
         assert_eq!(effective.device.as_deref(), Some("ASIO:EVO8"));
         assert!(effective.fallback.is_none());
+    }
+
+    #[test]
+    fn lab_sink_never_receives_a_physical_device() {
+        let candidates = vec![candidate("Mac mini Speakers", true)];
+        // Missing desired resolved to a physical fallback: the lab sink
+        // would reject that name, so it degrades to the lab output with
+        // the original desired preserved in the fallback record.
+        let resolved = resolve_effective_output_device_with_candidates("EVO8", &candidates);
+        let adapted = effective_output_for_sink(resolved, SinkType::LabNull, Some("EVO8"));
+        assert_eq!(
+            adapted.device.as_deref(),
+            Some(super::LAB_OUTPUT_DEVICE_NAME)
+        );
+        let fallback = adapted.fallback.expect("fallback record");
+        assert_eq!(fallback.desired, "EVO8");
+        assert_eq!(fallback.applied, super::LAB_OUTPUT_DEVICE_NAME);
+
+        // A present physical desired device is substituted the same way.
+        let resolved =
+            resolve_effective_output_device_with_candidates("Mac mini Speakers", &candidates);
+        let adapted =
+            effective_output_for_sink(resolved, SinkType::LabNull, Some("Mac mini Speakers"));
+        assert_eq!(
+            adapted.device.as_deref(),
+            Some(super::LAB_OUTPUT_DEVICE_NAME)
+        );
+        assert_eq!(
+            adapted.fallback.expect("fallback record").desired,
+            "Mac mini Speakers"
+        );
+
+        // None (engine chooses) and the lab name itself pass through, and
+        // the CPAL sink is never adapted.
+        let none = EffectiveOutputDevice {
+            device: None,
+            fallback: None,
+        };
+        let adapted = effective_output_for_sink(none, SinkType::LabNull, None);
+        assert_eq!(adapted.device, None);
+        assert!(adapted.fallback.is_none());
+
+        let resolved =
+            resolve_effective_output_device_with_candidates("Mac mini Speakers", &candidates);
+        let unadapted =
+            effective_output_for_sink(resolved, SinkType::Cpal, Some("Mac mini Speakers"));
+        assert_eq!(unadapted.device.as_deref(), Some("Mac mini Speakers"));
+        assert!(unadapted.fallback.is_none());
     }
 
     #[test]

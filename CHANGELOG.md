@@ -56,6 +56,48 @@ release is recorded here.
   0.7.15 (only the dead Audio Source selector was meant to be removed), and
   widened the sample-rate segmented control so six daemon-reported rates no
   longer overflow over their label.
+- macOS media keys (and the menu-bar/Touch Bar volume sliders) now control
+  systemwide volume: the HAL driver exposes volume and mute controls on
+  SotF Virtual Audio, so the system volume OSD works instead of showing
+  "no volume control", and the daemon applies the OS-visible gain to the
+  engine. Volume changes made in the UI publish back to the driver
+  control, so keys, sliders, and ConfigBar stay in sync, and the volume
+  persists across daemon restarts. The shared-memory protocol moves to
+  version 7 for the volume fields (placed in former header padding), so
+  the daemon and HAL driver from this release must be installed together;
+  mismatched pairings fail closed at startup, as with previous bumps.
+- The daemon now listens for CoreAudio property changes on the applied
+  output interface. Changing its sample rate in Audio MIDI Setup (or from
+  another host) triggers the same debounced, negotiated reconfigure as a
+  HAL request instead of playing at the wrong speed until the next manual
+  change; device plug/unplug and default-output changes invalidate the
+  cached device list immediately. Set `SOTF_DEVICE_LISTENER=0` to disable.
+- Fixed the remaining startup sample-rate desync (stored 96 kHz setup,
+  interface at 48 kHz): the device-support check above only ran on the IPC
+  apply path, so the HAL's startup request restarted the engine at 96 kHz
+  on a 48 kHz-max interface and the bad rate was acknowledged back,
+  leaving playback desynchronized until the rate was switched manually.
+  The driver-config watcher now negotiates against the output device the
+  same way and reports the negotiated rate to the HAL.
+- Fixed a HAL driver crash that made SotF Virtual Audio disappear from the
+  system device list: after a sample-rate re-anchor, the zero-timestamp
+  computation converted a negative host-time offset to `UInt64` and
+  trapped inside coreaudiod. The timing math is signed end to end now.
+- Playback, processing, and decoder threads join the CoreAudio device
+  workgroup on macOS, so the daemon keeps realtime scheduling under heavy
+  CPU load instead of crackling (opt out with `SOTF_AUDIO_WORKGROUP=0`).
+- Lab/sandbox mode no longer fails applies whose saved output device is
+  missing: the resolver substituted a physical fallback device that the
+  device-free lab sink then rejected. Resolved outputs are now adapted to
+  the sink that opens them — the desired device is preserved and the
+  divergence reported — in both the IPC apply path and the driver-config
+  reconfigure path.
+- Daemon tests that enumerate live audio devices or start real engine
+  pipelines now run in a serial nextest lane (`.config/nextest.toml`,
+  `live-audio` group), so parallel nextest processes no longer flake them
+  by contending for device state. Swift sources (ConfigBar and HAL
+  driver) are warning-free, and `just lint` type-checks them with
+  warnings as errors alongside clippy.
 
 ## 0.7.15 (daemon 0.1.38)
 

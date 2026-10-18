@@ -82,12 +82,17 @@ final class DriverClock {
         let periodFrames = Float64(max(period, 1))
         let zeroSampleTime = floor(currentSampleTime / periodFrames) * periodFrames
 
-        // Calculate the host time that corresponds to the zero sample time
+        // Calculate the host time that corresponds to the zero sample time.
+        // Signed math throughout: after setSampleRate re-anchors at an
+        // unaligned sample time, the period floor can land *before* the
+        // anchor, making the offset negative. Converting that to UInt64
+        // trapped (EXC_BREAKPOINT) and crash-looped the driver host until
+        // coreaudiod deactivated the device (2026-10-17).
         let sampleOffset = zeroSampleTime - anchorSampleTime
         let secondsOffset = sampleOffset / sampleRate
-        let nanosOffset = UInt64(secondsOffset * 1_000_000_000.0)
-        let hostOffset = nanosOffset * UInt64(Self.timebaseInfo.denom) / UInt64(Self.timebaseInfo.numer)
-        let zeroHostTime = anchorHostTime + hostOffset
+        let nanosOffset = Int64(secondsOffset * 1_000_000_000.0)
+        let hostOffset = nanosOffset * Int64(Self.timebaseInfo.denom) / Int64(Self.timebaseInfo.numer)
+        let zeroHostTime = UInt64(max(Int64(0), Int64(bitPattern: anchorHostTime) + hostOffset))
 
         return (zeroSampleTime, zeroHostTime, clockSeed)
     }

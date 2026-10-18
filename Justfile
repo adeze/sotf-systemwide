@@ -27,6 +27,10 @@ check:
 test:
 	{{cargo}} test --workspace --all-targets
 
+[group('test')]
+ntest:
+	{{cargo}} nextest run --workspace --all-targets
+
 # Run the Swift ConfigBar XCTest suites. `swift test` silently discovers
 # zero XCTest cases on current toolchains, so this executes the bundles via
 # xctest and fails when discovery regresses to zero.
